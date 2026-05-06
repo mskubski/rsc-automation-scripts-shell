@@ -1,6 +1,0 @@
-query {
-  allCustomReports(input: {}) {
-    name
-    id
-  }
-}

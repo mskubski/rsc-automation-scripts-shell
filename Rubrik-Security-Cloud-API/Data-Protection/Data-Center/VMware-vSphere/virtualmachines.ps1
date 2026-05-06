@@ -1,1 +1,0 @@
-Get-RscVmwareVm -Name "Foo" -Relic:$false -Replica:$false

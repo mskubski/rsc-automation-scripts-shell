@@ -377,31 +377,6 @@ bash getAllclustersWrite2CSV.sh
 
 ---
 
-### `slaDomainsByNameGet.sh` *(legacy)*
-
-Searches for SLA domains by name and returns the full SLA policy detail including snapshot schedules, archival specs, replication specs, and object-type-specific configurations.
-
-**Uses:** Hardcoded credentials and hardcoded search term (`"foo"`) — edit both inside the script before use.
-
-**Usage:**
-```bash
-bash slaDomainsByNameGet.sh
-```
-
-**Output:** Formatted JSON with full SLA policy detail.
-
----
-
-### `slaDomainfromRSC.sh` *(legacy — broken)*
-
-Intended to retrieve a single SLA domain by its UUID with full policy details.
-
-> **Warning:** This script is missing its authentication block — `$RSC_TOKEN` is never set.
-> It also has a hardcoded SLA UUID (`0CC22D1B-B761-4EF3-BC5B-82706D97FB05`).
-> Both must be fixed before the script will work.
-
----
-
 ### `createSLA.sh` *(current)*
 
 Creates a new global SLA domain for vSphere and MSSQL object types with a daily backup schedule (1x per day, 7-day retention). Prompts interactively for the SLA name.
@@ -448,19 +423,3 @@ VM name:  win2016-fs
 
 **Output:** Confirmation message on success or a detailed error if any step fails.
 
----
-
-## Reference Library (`Rubrik-Security-Cloud-API/`)
-
-The `Rubrik-Security-Cloud-API/` directory contains canonical GraphQL query and mutation examples, each available as `.gql` (raw GraphQL), `.sh` (Bash wrapper), and `.ps1` (PowerShell wrapper).
-
-| Directory | Contents |
-|---|---|
-| `Data-Protection/Data-Center/VMware-vSphere/` | VM snapshots, export, live mount, file recovery, job status |
-| `Data-Protection/SLA-Domains/` | SLA CRUD operations |
-| `Data-Protection/Snapshots/` | Snapshot management, legal hold |
-| `Observability/` | Events, metrics, reports |
-| `SaaS-App-Protection/microsoft-m365/` | M365 mailboxes, OneDrive, Teams, SharePoint |
-| `Threat-Analytics/` | Anomaly detection, YARA threat hunt, threat monitoring |
-| `System-Settings/` | Users, global certificates |
-| `Annapurna/` | Python/LangChain AI integration with RSC |

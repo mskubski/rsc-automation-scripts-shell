@@ -1,2 +1,0 @@
-name,id,type,version,defaultAddress,systemStatus,status,subStatus,pauseStatus,encryptionEnabled,eosDate,eosStatus,registrationTime,registeredMode,estimatedRunway,geoAddress,geoLatitude,geoLongitude
-"Rubrik-Demo1","c1f6970a-3bce-4e41-b324-f7c5c5e01079","Robo","9.4.2-p3-31101","rubrik-demo1.rubrik.lab","OK","Connected","DEFAULT","NOT_PAUSED","false","2027-01-14","EOS_STATUS_SUPPORTED","2026-01-18T21:20:52.000Z","HYBRID",1826,"Palo Alto, CA, USA","37.4418834","-122.1430195"

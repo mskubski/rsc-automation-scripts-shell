@@ -1,1 +1,0 @@
-Get-RscAwsNativeEc2Instance
