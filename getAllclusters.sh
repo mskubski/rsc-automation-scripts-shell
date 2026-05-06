@@ -1,22 +1,80 @@
 #!/bin/bash
+# ==============================================================================
+# getAllclusters.sh
+#
+# Description:
+#   Queries all Rubrik clusters registered in RSC and prints detailed JSON
+#   output including capacity metrics, node details, geo-location, and status.
+#
+# Requirements:
+#   - curl, jq
+#   - .env file with RSC credentials (same directory as this script)
+#   - rsc_auth.sh in the same directory (shared token cache)
+#
+# Usage:
+#   bash getAllclusters.sh
+# ==============================================================================
 
-export RSC_FQDN="rubrik-rcf-86506.my.rubrik.com"
-export RSC_CLIENT_ID="client|019be083-fde4-7a48-8fdf-a793cb0c08ec"
-export RSC_CLIENT_SECRET="zEhKZ8nPQdT0dqf7F8B5hZrsiJPnlylqFFJMKKNcDGKAC57lMeCeB3-u2aM5WE5O"
+set -euo pipefail
 
-RSC_TOKEN=$(curl --silent --location "https://$RSC_FQDN/api/client_token" \
-  --header "Content-Type: application/x-www-form-urlencoded" \
-  --data "client_id=$RSC_CLIENT_ID&client_secret=$RSC_CLIENT_SECRET&grant_type=client_credentials" | jq -r '.access_token')
+SCRIPT_DIR="$(dirname "$0")"
 
-export RSC_TOKEN
+if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
+  echo "Error: .env file not found at $SCRIPT_DIR/.env" >&2; exit 1
+fi
+source "$SCRIPT_DIR/.env"
 
-# RSC_TOKEN="YOUR_RSC_ACCESS_TOKEN"
-query="query { clusterConnection( filter : { } ) { nodes { name id type version defaultAddress ipmiInfo { isAvailable usesIkvm usesHttps } systemStatus status subStatus pauseStatus encryptionEnabled eosDate eosStatus registrationTime registeredMode estimatedRunway geoLocation { address latitude longitude } metric { totalCapacity availableCapacity usedCapacity snapshotCapacity liveMountCapacity miscellaneousCapacity pendingSnapshotCapacity cdpCapacity lastUpdateTime averageDailyGrowth } clusterNodeConnection { nodes { hostname id brikId ipAddress status } } } } }"
+: "${RSC_FQDN:?Error: RSC_FQDN not set in .env}"
+: "${RSC_CLIENT_ID:?Error: RSC_CLIENT_ID not set in .env}"
+: "${RSC_CLIENT_SECRET:?Error: RSC_CLIENT_SECRET not set in .env}"
+: "${RSC_TOKEN_URI:?Error: RSC_TOKEN_URI not set in .env}"
 
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required but not installed. Run: brew install jq" >&2; exit 1
+fi
 
-  # Execute the GraphQL query with curl (suppress progress meter, show errors on failure)
-curl --silent --show-error --fail -X POST \
+# ==============================================================================
+# AUTHENTICATE (uses cached token when still valid)
+# ==============================================================================
+echo "Connecting to RSC ($RSC_FQDN)..."
+source "$SCRIPT_DIR/rsc_auth.sh"
+get_rsc_token || exit 1
+
+# ==============================================================================
+# QUERY ALL CLUSTERS
+# ==============================================================================
+QUERY='query {
+  clusterConnection(filter: {}) {
+    nodes {
+      name id type version defaultAddress
+      ipmiInfo { isAvailable usesIkvm usesHttps }
+      systemStatus status subStatus pauseStatus
+      encryptionEnabled eosDate eosStatus
+      registrationTime registeredMode estimatedRunway
+      geoLocation { address latitude longitude }
+      metric {
+        totalCapacity availableCapacity usedCapacity
+        snapshotCapacity liveMountCapacity miscellaneousCapacity
+        pendingSnapshotCapacity cdpCapacity
+        lastUpdateTime averageDailyGrowth
+      }
+      clusterNodeConnection {
+        nodes { hostname id brikId ipAddress status }
+      }
+    }
+  }
+}'
+
+RESPONSE=$(curl --silent -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $RSC_TOKEN" \
-  -d "{\"query\": \"$query\"}" \
-  https://$RSC_FQDN/api/graphql | jq '.'
+  -d "$(jq -n --arg q "$QUERY" '{query: $q}')" \
+  "https://$RSC_FQDN/api/graphql")
+
+if echo "$RESPONSE" | jq -e '.errors' &>/dev/null; then
+  echo "Error: API returned errors:" >&2
+  echo "$RESPONSE" | jq '.errors' >&2
+  exit 1
+fi
+
+echo "$RESPONSE" | jq '.'

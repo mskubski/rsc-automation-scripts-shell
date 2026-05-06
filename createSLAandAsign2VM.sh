@@ -1,134 +1,134 @@
 #!/bin/bash
-
 # ==============================================================================
-# 1. CONFIGURATION / VARIABLES
+# createSLAandAsign2VM.sh
+#
+# Description:
+#   Creates a new SLA domain (or reuses one with the same name if it already
+#   exists) and assigns it to a specific VM. Both the SLA name and VM name are
+#   entered interactively.
+#
+# Flow:
+#   1. Prompt for SLA name and VM name
+#   2. Search RSC for an existing SLA with that exact name
+#   3. If not found: create a new global SLA (daily, 7-day retention)
+#   4. Find the VM by name in the vSphere inventory
+#   5. Assign the SLA to the VM
+#
+# Requirements:
+#   - curl, jq
+#   - .env file with RSC credentials (same directory as this script)
+#   - rsc_auth.sh in the same directory (shared token cache)
+#
+# Usage:
+#   bash createSLAandAsign2VM.sh
 # ==============================================================================
 
-# Define the name for the new SLA Domain you want to create
-NEW_SLA_NAME="Maurice"
+set -euo pipefail
 
-# Define the exact name of the VM you want to protect
-TARGET_VM_NAME="win2016-fs"
+SCRIPT_DIR="$(dirname "$0")"
 
-# Rubrik Security Cloud Credentials
-export RSC_FQDN="rubrik-rcf-86506.my.rubrik.com"
-export RSC_CLIENT_ID="client|019be083-fde4-7a48-8fdf-a793cb0c08ec"
-export RSC_CLIENT_SECRET="zEhKZ8nPQdT0dqf7F8B5hZrsiJPnlylqFFJMKKNcDGKAC57lMeCeB3-u2aM5WE5O"
+if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
+  echo "Error: .env file not found at $SCRIPT_DIR/.env" >&2; exit 1
+fi
+source "$SCRIPT_DIR/.env"
 
-# Check if jq is installed (required for JSON parsing)
-if ! command -v jq &> /dev/null; then
-    echo "Error: jq is not installed. Please install it to run this script."
-    exit 1
+: "${RSC_FQDN:?Error: RSC_FQDN not set in .env}"
+: "${RSC_CLIENT_ID:?Error: RSC_CLIENT_ID not set in .env}"
+: "${RSC_CLIENT_SECRET:?Error: RSC_CLIENT_SECRET not set in .env}"
+: "${RSC_TOKEN_URI:?Error: RSC_TOKEN_URI not set in .env}"
+
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required but not installed. Run: brew install jq" >&2; exit 1
 fi
 
 # ==============================================================================
-# 2. AUTHENTICATION (Get Bearer Token)
+# 1. AUTHENTICATE (uses cached token when still valid)
 # ==============================================================================
-echo "Step 1: Authenticating with RSC..."
+echo "Connecting to RSC ($RSC_FQDN)..."
+source "$SCRIPT_DIR/rsc_auth.sh"
+get_rsc_token || exit 1
 
-# Request the token using Client Credentials Grant
-TOKEN_RESPONSE=$(curl --silent --location "https://$RSC_FQDN/api/client_token" \
-  --header "Content-Type: application/x-www-form-urlencoded" \
-  --data "client_id=$RSC_CLIENT_ID&client_secret=$RSC_CLIENT_SECRET&grant_type=client_credentials")
+# ==============================================================================
+# 2. PROMPT FOR NAMES
+# ==============================================================================
+echo ""
+read -rp "SLA name: " NEW_SLA_NAME
+read -rp "VM name:  " TARGET_VM_NAME
 
-# Extract the access token using jq
-RSC_TOKEN=$(echo $TOKEN_RESPONSE | jq -r '.access_token')
-
-# Validate if token was received
-if [ "$RSC_TOKEN" == "null" ] || [ -z "$RSC_TOKEN" ]; then
-  echo "Error: Failed to retrieve access token. Check credentials."
-  echo "Response: $TOKEN_RESPONSE"
-  exit 1
+if [[ -z "$NEW_SLA_NAME" || -z "$TARGET_VM_NAME" ]]; then
+  echo "Error: SLA name and VM name are required." >&2; exit 1
 fi
-echo "-> Authentication successful."
 
 # ==============================================================================
-# 3. CREATE OR FIND SLA DOMAIN
+# 3. FIND OR CREATE SLA DOMAIN
 # ==============================================================================
-echo "Step 2: Ensuring SLA Domain '$NEW_SLA_NAME' exists..."
+echo ""
+echo "Searching for SLA '$NEW_SLA_NAME'..."
 
-# First, try to find an existing SLA with the same name
-SLA_SEARCH_QUERY="query { slaDomains(filter: {field: NAME text: \"$NEW_SLA_NAME\"}) { nodes { id name } } }"
-JSON_PAYLOAD=$(jq -n --arg q "$SLA_SEARCH_QUERY" '{query: $q}')
-SLA_SEARCH_RESPONSE=$(curl --silent -X POST \
-  -H "Authorization: Bearer $RSC_TOKEN" \
+SLA_SEARCH=$(curl --silent -X POST \
   -H "Content-Type: application/json" \
-  -d "$JSON_PAYLOAD" \
+  -H "Authorization: Bearer $RSC_TOKEN" \
+  -d "$(jq -n --arg q "query { slaDomains(filter: {field: NAME text: \"$NEW_SLA_NAME\"}) { nodes { id name } } }" '{query: $q}')" \
   "https://$RSC_FQDN/api/graphql")
 
-# Extract existing SLA ID if present by exact name match
-# Use jq to select nodes where the name equals the requested name exactly
-EXISTING_SLA_ID=$(echo "$SLA_SEARCH_RESPONSE" | jq -r --arg name "$NEW_SLA_NAME" '.data.slaDomains.nodes[] | select(.name == $name) | .id' | head -n 1)
+NEW_SLA_ID=$(echo "$SLA_SEARCH" | jq -r --arg name "$NEW_SLA_NAME" \
+  '.data.slaDomains.nodes[] | select(.name == $name) | .id' | head -n 1)
 
-if [ -n "$EXISTING_SLA_ID" ] && [ "$EXISTING_SLA_ID" != "null" ]; then
-  NEW_SLA_ID=$EXISTING_SLA_ID
-  echo "-> Found existing SLA with exact name '$NEW_SLA_NAME'. ID: $NEW_SLA_ID"
+if [[ -n "$NEW_SLA_ID" ]]; then
+  echo "-> Found existing SLA '$NEW_SLA_NAME'. ID: $NEW_SLA_ID"
 else
-  echo "-> No existing SLA found. Creating new SLA Domain '$NEW_SLA_NAME'..."
+  echo "-> SLA not found. Creating '$NEW_SLA_NAME'..."
 
-  # Define the Mutation to create the SLA.
-  # Config: Daily backup, retention 7 days.
-  CREATE_SLA_QUERY="mutation createSla { 
-    createGlobalSla(input: { 
-      name: \"$NEW_SLA_NAME\" 
-      objectTypes: [VSPHERE_OBJECT_TYPE] 
-      snapshotSchedule: { 
-        daily: { basicSchedule: { frequency: 1 retention: 7 retentionUnit: DAYS } } 
-      } 
-    }) { 
-      id 
-      name 
-    } 
+  CREATE_MUTATION="mutation {
+    createGlobalSla(input: {
+      name: \"$NEW_SLA_NAME\"
+      objectTypes: [VSPHERE_OBJECT_TYPE]
+      snapshotSchedule: {
+        daily: {
+          basicSchedule: { frequency: 1 retention: 7 retentionUnit: DAYS }
+        }
+      }
+    }) { id name }
   }"
 
-  # Build valid JSON payload
-  JSON_PAYLOAD=$(jq -n --arg q "$CREATE_SLA_QUERY" '{query: $q}')
-
-  # Execute API Call
   SLA_RESPONSE=$(curl --silent -X POST \
-    -H "Authorization: Bearer $RSC_TOKEN" \
     -H "Content-Type: application/json" \
-    -d "$JSON_PAYLOAD" \
+    -H "Authorization: Bearer $RSC_TOKEN" \
+    -d "$(jq -n --arg q "$CREATE_MUTATION" '{query: $q}')" \
     "https://$RSC_FQDN/api/graphql")
 
-  # Extract the new SLA ID
-  NEW_SLA_ID=$(echo $SLA_RESPONSE | jq -r '.data.createGlobalSla.id')
-
-  # Check if creation was successful
-  if [ "$NEW_SLA_ID" == "null" ] || [ -z "$NEW_SLA_ID" ]; then
-    echo "Error: Failed to create SLA. Response: $SLA_RESPONSE"
+  if echo "$SLA_RESPONSE" | jq -e '.errors' &>/dev/null; then
+    echo "Error: Failed to create SLA:" >&2
+    echo "$SLA_RESPONSE" | jq '.errors' >&2
     exit 1
   fi
-  echo "-> SLA created successfully. ID: $NEW_SLA_ID"
+
+  NEW_SLA_ID=$(echo "$SLA_RESPONSE" | jq -r '.data.createGlobalSla.id // empty')
+
+  if [[ -z "$NEW_SLA_ID" ]]; then
+    echo "Error: SLA creation returned no ID." >&2
+    echo "$SLA_RESPONSE" | jq '.' >&2
+    exit 1
+  fi
+  echo "-> SLA created. ID: $NEW_SLA_ID"
 fi
 
 # ==============================================================================
-# 4. FIND VM ID (Lookup by Name)
+# 4. FIND VM BY NAME
 # ==============================================================================
-echo "Step 3: Searching for VM '$TARGET_VM_NAME' to get its ID..."
+echo ""
+echo "Searching for VM '$TARGET_VM_NAME'..."
 
-# GraphQL Query to find the VM by name
-# Use the supported vSphere VM connection field (vSphereVmNewConnection) and a filter
-VM_QUERY="query { vSphereVmNewConnection(filter: [{field: NAME texts: \"$TARGET_VM_NAME\"}]) { nodes { id name } } }"
-
-# Build valid JSON payload
-JSON_PAYLOAD=$(jq -n --arg q "$VM_QUERY" '{query: $q}')
-
-# Execute API Call
 VM_RESPONSE=$(curl --silent -X POST \
-  -H "Authorization: Bearer $RSC_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "$JSON_PAYLOAD" \
+  -H "Authorization: Bearer $RSC_TOKEN" \
+  -d "$(jq -n --arg q "query { vSphereVmNewConnection(filter: [{field: NAME texts: \"$TARGET_VM_NAME\"}]) { nodes { id name } } }" '{query: $q}')" \
   "https://$RSC_FQDN/api/graphql")
 
-# Extract the VM ID (taking the first result)
-VM_ID=$(echo $VM_RESPONSE | jq -r '.data.vSphereVmNewConnection.nodes[0].id')
+VM_ID=$(echo "$VM_RESPONSE" | jq -r '.data.vSphereVmNewConnection.nodes[0].id // empty')
 
-# Check if VM was found
-if [ "$VM_ID" == "null" ] || [ -z "$VM_ID" ]; then
-  echo "Error: VM '$TARGET_VM_NAME' not found in Rubrik Inventory."
-  # Print raw response for debugging so we can see why no nodes were returned
-  echo "Response: $VM_RESPONSE"
+if [[ -z "$VM_ID" ]]; then
+  echo "Error: VM '$TARGET_VM_NAME' not found in RSC inventory." >&2
   exit 1
 fi
 echo "-> VM found. ID: $VM_ID"
@@ -136,36 +136,30 @@ echo "-> VM found. ID: $VM_ID"
 # ==============================================================================
 # 5. ASSIGN SLA TO VM
 # ==============================================================================
-echo "Step 4: Assigning the new SLA to the VM..."
+echo ""
+echo "Assigning SLA '$NEW_SLA_NAME' to VM '$TARGET_VM_NAME'..."
 
-# Mutation to assign the SLA using the IDs we found in Step 3 and 4
-ASSIGN_QUERY="mutation assignSla { 
-  assignSla(input: { 
-    slaDomainAssignType: protectWithSlaId 
-    slaOptionalId: \"$NEW_SLA_ID\" 
-    objectIds: [\"$VM_ID\"] 
-  }) { 
-    success 
-  } 
+ASSIGN_MUTATION="mutation {
+  assignSla(input: {
+    slaDomainAssignType: protectWithSlaId
+    slaOptionalId: \"$NEW_SLA_ID\"
+    objectIds: [\"$VM_ID\"]
+  }) { success }
 }"
 
-# Build valid JSON payload
-JSON_PAYLOAD=$(jq -n --arg q "$ASSIGN_QUERY" '{query: $q}')
-
-# Execute API Call
 ASSIGN_RESPONSE=$(curl --silent -X POST \
-  -H "Authorization: Bearer $RSC_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "$JSON_PAYLOAD" \
+  -H "Authorization: Bearer $RSC_TOKEN" \
+  -d "$(jq -n --arg q "$ASSIGN_MUTATION" '{query: $q}')" \
   "https://$RSC_FQDN/api/graphql")
 
-# Check result
-SUCCESS=$(echo $ASSIGN_RESPONSE | jq -r '.data.assignSla.success')
+SUCCESS=$(echo "$ASSIGN_RESPONSE" | jq -r '.data.assignSla.success // "false"')
 
-if [ "$SUCCESS" == "true" ]; then
-  echo "SUCCESS! VM '$TARGET_VM_NAME' is now protected by SLA '$NEW_SLA_NAME'."
+if [[ "$SUCCESS" == "true" ]]; then
+  echo ""
+  echo "Done. VM '$TARGET_VM_NAME' is now protected by SLA '$NEW_SLA_NAME'."
 else
-  echo "Error: Assignment failed."
-  echo "Response: $ASSIGN_RESPONSE"
+  echo "Error: SLA assignment failed." >&2
+  echo "$ASSIGN_RESPONSE" | jq '.' >&2
   exit 1
 fi

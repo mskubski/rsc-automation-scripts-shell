@@ -1,54 +1,100 @@
 #!/bin/bash
+# ==============================================================================
+# getAllclustersWrite2CSV.sh
+#
+# Description:
+#   Queries all Rubrik clusters registered in RSC and writes results to
+#   clusters.csv in the current working directory. Useful for reporting or
+#   importing into spreadsheet tools.
+#
+# Requirements:
+#   - curl, jq
+#   - .env file with RSC credentials (same directory as this script)
+#   - rsc_auth.sh in the same directory (shared token cache)
+#
+# Usage:
+#   bash getAllclustersWrite2CSV.sh
+# ==============================================================================
 
-export RSC_FQDN="rubrik-rcf-86506.my.rubrik.com"
-export RSC_CLIENT_ID="client|019be083-fde4-7a48-8fdf-a793cb0c08ec"
-export RSC_CLIENT_SECRET="zEhKZ8nPQdT0dqf7F8B5hZrsiJPnlylqFFJMKKNcDGKAC57lMeCeB3-u2aM5WE5O"
+set -euo pipefail
 
-RSC_TOKEN=$(curl --silent --location "https://$RSC_FQDN/api/client_token" \
-  --header "Content-Type: application/x-www-form-urlencoded" \
-  --data "client_id=$RSC_CLIENT_ID&client_secret=$RSC_CLIENT_SECRET&grant_type=client_credentials" | jq -r '.access_token')
+SCRIPT_DIR="$(dirname "$0")"
 
-export RSC_TOKEN
+if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
+  echo "Error: .env file not found at $SCRIPT_DIR/.env" >&2; exit 1
+fi
+source "$SCRIPT_DIR/.env"
 
-# RSC_TOKEN="YOUR_RSC_ACCESS_TOKEN"
-# query="query { clusterConnection( filter : { } ) { nodes { name id type version defaultAddress ipmiInfo { isAvailable usesIkvm usesHttps } systemStatus status subStatus pauseStatus encryptionEnabled eosDate eosStatus registrationTime registeredMode estimatedRunway geoLocation { address latitude longitude } metric { totalCapacity availableCapacity usedCapacity snapshotCapacity liveMountCapacity miscellaneousCapacity pendingSnapshotCapacity cdpCapacity lastUpdateTime averageDailyGrowth } clusterNodeConnection { nodes { hostname id brikId ipAddress status } } } } }"
-query="query { clusterConnection( filter : { } ) { nodes { name id type version defaultAddress systemStatus status subStatus pauseStatus encryptionEnabled eosDate eosStatus registrationTime registeredMode estimatedRunway geoLocation { address latitude longitude } } } }"
+: "${RSC_FQDN:?Error: RSC_FQDN not set in .env}"
+: "${RSC_CLIENT_ID:?Error: RSC_CLIENT_ID not set in .env}"
+: "${RSC_CLIENT_SECRET:?Error: RSC_CLIENT_SECRET not set in .env}"
+: "${RSC_TOKEN_URI:?Error: RSC_TOKEN_URI not set in .env}"
 
-# Output CSV file (change path/name if needed)
-OUTPUT_CSV="./clusters.csv"
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required but not installed. Run: brew install jq" >&2; exit 1
+fi
 
-# Write CSV header
-echo "name,id,type,version,defaultAddress,systemStatus,status,subStatus,pauseStatus,encryptionEnabled,eosDate,eosStatus,registrationTime,registeredMode,estimatedRunway,geoAddress,geoLatitude,geoLongitude" > "$OUTPUT_CSV"
+# ==============================================================================
+# AUTHENTICATE (uses cached token when still valid)
+# ==============================================================================
+echo "Connecting to RSC ($RSC_FQDN)..."
+source "$SCRIPT_DIR/rsc_auth.sh"
+get_rsc_token || exit 1
 
-# Execute the GraphQL query with curl (suppress progress meter, show errors on failure)
-# Pipe JSON to jq to extract fields and emit CSV rows, append to OUTPUT_CSV
-curl --silent --show-error --fail -X POST \
+# ==============================================================================
+# QUERY ALL CLUSTERS
+# ==============================================================================
+QUERY='query {
+  clusterConnection(filter: {}) {
+    nodes {
+      name id type version defaultAddress
+      systemStatus status subStatus pauseStatus
+      encryptionEnabled eosDate eosStatus
+      registrationTime registeredMode estimatedRunway
+      geoLocation { address latitude longitude }
+    }
+  }
+}'
+
+RESPONSE=$(curl --silent -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $RSC_TOKEN" \
-  -d "{\"query\": \"$query\"}" \
-  https://$RSC_FQDN/api/graphql \
-  | jq -r '.data.clusterConnection.nodes[] 
-      | [
-          (.name // ""), 
-          (.id // ""), 
-          (.type // ""), 
-          (.version // ""), 
-          (.defaultAddress // ""), 
-          (.systemStatus // ""), 
-          (.status // ""), 
-          (.subStatus // ""), 
-          (.pauseStatus // ""), 
-          (if .encryptionEnabled == true then "true" else "false" end),
-          (.eosDate // ""), 
-          (.eosStatus // ""), 
-          (.registrationTime // ""), 
-          (.registeredMode // ""), 
-          (.estimatedRunway // ""), 
-          (.geoLocation.address // ""), 
-          ((.geoLocation.latitude // "") | tostring), 
-          ((.geoLocation.longitude // "") | tostring)
-        ] 
-      | @csv' >> "$OUTPUT_CSV"
+  -d "$(jq -n --arg q "$QUERY" '{query: $q}')" \
+  "https://$RSC_FQDN/api/graphql")
 
-# Print location of CSV
-echo "Wrote CSV to: $OUTPUT_CSV"
+if echo "$RESPONSE" | jq -e '.errors' &>/dev/null; then
+  echo "Error: API returned errors:" >&2
+  echo "$RESPONSE" | jq '.errors' >&2
+  exit 1
+fi
+
+# ==============================================================================
+# WRITE CSV
+# ==============================================================================
+OUTPUT_CSV="./clusters.csv"
+
+echo "name,id,type,version,defaultAddress,systemStatus,status,subStatus,pauseStatus,encryptionEnabled,eosDate,eosStatus,registrationTime,registeredMode,estimatedRunway,geoAddress,geoLatitude,geoLongitude" > "$OUTPUT_CSV"
+
+echo "$RESPONSE" | jq -r '.data.clusterConnection.nodes[] |
+  [
+    (.name           // ""),
+    (.id             // ""),
+    (.type           // ""),
+    (.version        // ""),
+    (.defaultAddress // ""),
+    (.systemStatus   // ""),
+    (.status         // ""),
+    (.subStatus      // ""),
+    (.pauseStatus    // ""),
+    (if .encryptionEnabled == true then "true" else "false" end),
+    (.eosDate        // ""),
+    (.eosStatus      // ""),
+    (.registrationTime  // ""),
+    (.registeredMode    // ""),
+    (.estimatedRunway   // ""),
+    (.geoLocation.address   // ""),
+    ((.geoLocation.latitude  // "") | tostring),
+    ((.geoLocation.longitude // "") | tostring)
+  ] | @csv' >> "$OUTPUT_CSV"
+
+echo "Wrote $(( $(wc -l < "$OUTPUT_CSV") - 1 )) cluster(s) to: $OUTPUT_CSV"

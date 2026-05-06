@@ -15,7 +15,7 @@ All scripts are written in Bash and require `curl` and `jq`.
 
 ## Credentials — `.env` file
 
-The current scripts (`createSLAenv.sh`, `startVMbackup.sh`, `startVMbackupWithStatus.sh`, `getClusterNetworkInfo.sh`, `askruby.sh`, `restoreVM.sh`, `filerestoreVM.sh`) load credentials from a `.env` file in the same directory. The legacy scripts have credentials hardcoded inside them and do not use `.env` — see each script's section below for details.
+All scripts load credentials from a `.env` file in the same directory.
 
 This file must exist before running any script that sources it.
 
@@ -343,33 +343,33 @@ The script exits with code `0` on success or code `1` on failure or cancellation
 
 ---
 
-### `getAllclusters.sh` *(legacy)*
+### `getAllclusters.sh` *(current)*
 
 Queries all Rubrik clusters registered in RSC and prints detailed JSON output including capacity metrics, node details, geo-location, and status information.
 
-**Uses:** Hardcoded credentials — update `RSC_FQDN`, `RSC_CLIENT_ID`, and `RSC_CLIENT_SECRET` inside the script before use.
+**Uses:** `.env` file
 
 **Usage:**
 ```bash
 bash getAllclusters.sh
 ```
 
-**Output:** Formatted JSON with cluster inventory.
+**Output:** Formatted JSON with full cluster inventory including capacity metrics (`totalCapacity`, `availableCapacity`, `usedCapacity`, `averageDailyGrowth`), node details, and geo-location.
 
 ---
 
-### `getAllclustersWrite2CSV.sh` *(legacy)*
+### `getAllclustersWrite2CSV.sh` *(current)*
 
 Same cluster query as `getAllclusters.sh` but writes results to `clusters.csv` in the current working directory instead of printing to the terminal. Useful for reporting or importing into spreadsheet tools.
 
-**Uses:** Hardcoded credentials — update credentials inside the script before use.
+**Uses:** `.env` file
 
 **Usage:**
 ```bash
 bash getAllclustersWrite2CSV.sh
 ```
 
-**Output:** `./clusters.csv` with one row per cluster. Existing file is overwritten without warning.
+**Output:** `./clusters.csv` with one row per cluster. Existing file is overwritten without warning. A count of written rows is printed on completion.
 
 **CSV columns:** `name, id, type, version, defaultAddress, systemStatus, status, subStatus, pauseStatus, encryptionEnabled, eosDate, eosStatus, registrationTime, registeredMode, estimatedRunway, geoAddress, geoLatitude, geoLongitude`
 
@@ -400,26 +400,51 @@ Intended to retrieve a single SLA domain by its UUID with full policy details.
 
 ---
 
-### `createSLA.sh` *(legacy)*
+### `createSLA.sh` *(current)*
 
-Original version of `createSLAenv.sh`. Creates a global SLA domain with a hardcoded name (`"foo"`), daily schedule, and 7-day retention.
+Creates a new global SLA domain for vSphere and MSSQL object types with a daily backup schedule (1x per day, 7-day retention). Prompts interactively for the SLA name.
 
-**Uses:** Hardcoded credentials — superseded by `createSLAenv.sh`.
+**Uses:** `.env` file
+
+**Usage:**
+```bash
+bash createSLA.sh
+```
+
+The script prompts for the SLA name:
+```
+Enter SLA name: MyNewSLA
+```
+
+**Output:** JSON response with the created SLA `name` and `id`.
 
 ---
 
-### `createSLAandAsign2VM.sh` *(legacy)*
+### `createSLAandAsign2VM.sh` *(current)*
 
-Creates a new SLA domain (or finds an existing one with the same name) and assigns it to a specific VM — both identified by hardcoded names inside the script.
+Creates a new SLA domain (or reuses one with the same name if it already exists) and assigns it to a specific VM. Both names are entered interactively.
 
-**Uses:** Hardcoded credentials, hardcoded SLA name (`Maurice`), and hardcoded VM name (`win2016-fs`).
+**Uses:** `.env` file
 
 **Usage:**
 ```bash
 bash createSLAandAsign2VM.sh
 ```
 
-Edit `NEW_SLA_NAME` and `TARGET_VM_NAME` at the top of the script before running.
+Example interaction:
+```
+SLA name: GoldSLA
+VM name:  win2016-fs
+```
+
+**Flow:**
+
+1. Searches RSC for an existing SLA with the exact name provided.
+2. If not found: creates a new global SLA (vSphere, daily schedule, 7-day retention).
+3. Finds the VM by name in the vSphere inventory.
+4. Assigns the SLA to the VM.
+
+**Output:** Confirmation message on success or a detailed error if any step fails.
 
 ---
 

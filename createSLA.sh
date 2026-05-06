@@ -1,23 +1,96 @@
 #!/bin/bash
+# ==============================================================================
+# createSLA.sh
+#
+# Description:
+#   Creates a new global SLA domain for vSphere and MSSQL object types with a
+#   daily backup schedule (1x per day, 7-day retention). Prompts interactively
+#   for the SLA name.
+#
+# Requirements:
+#   - curl, jq
+#   - .env file with RSC credentials (same directory as this script)
+#   - rsc_auth.sh in the same directory (shared token cache)
+#
+# Usage:
+#   bash createSLA.sh
+# ==============================================================================
 
-#!/bin/bash
+set -euo pipefail
 
-export RSC_FQDN="rubrik-rcf-86506.my.rubrik.com"
-export RSC_CLIENT_ID="client|019be083-fde4-7a48-8fdf-a793cb0c08ec"
-export RSC_CLIENT_SECRET="zEhKZ8nPQdT0dqf7F8B5hZrsiJPnlylqFFJMKKNcDGKAC57lMeCeB3-u2aM5WE5O"
+SCRIPT_DIR="$(dirname "$0")"
 
-RSC_TOKEN=$(curl --silent --location "https://$RSC_FQDN/api/client_token" \
-  --header "Content-Type: application/x-www-form-urlencoded" \
-  --data "client_id=$RSC_CLIENT_ID&client_secret=$RSC_CLIENT_SECRET&grant_type=client_credentials" | jq -r '.access_token')
+if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
+  echo "Error: .env file not found at $SCRIPT_DIR/.env" >&2; exit 1
+fi
+source "$SCRIPT_DIR/.env"
 
-export RSC_TOKEN
+: "${RSC_FQDN:?Error: RSC_FQDN not set in .env}"
+: "${RSC_CLIENT_ID:?Error: RSC_CLIENT_ID not set in .env}"
+: "${RSC_CLIENT_SECRET:?Error: RSC_CLIENT_SECRET not set in .env}"
+: "${RSC_TOKEN_URI:?Error: RSC_TOKEN_URI not set in .env}"
 
-# RSC_TOKEN="YOUR_RSC_ACCESS_TOKEN"
-query="mutation createSla { createGlobalSla(input: { name: \\\"foo\\\" objectTypes: [VSPHERE_OBJECT_TYPE MSSQL_OBJECT_TYPE] snapshotSchedule: { daily: { basicSchedule: { frequency: 1 retention: 7 retentionUnit: DAYS } } } }) { name id } }"
+if ! command -v jq &>/dev/null; then
+  echo "Error: jq is required but not installed. Run: brew install jq" >&2; exit 1
+fi
 
-# Execute the GraphQL query with curl
-curl -X POST \
+# ==============================================================================
+# AUTHENTICATE (uses cached token when still valid)
+# ==============================================================================
+echo "Connecting to RSC ($RSC_FQDN)..."
+source "$SCRIPT_DIR/rsc_auth.sh"
+get_rsc_token || exit 1
+
+# ==============================================================================
+# PROMPT FOR SLA NAME
+# ==============================================================================
+echo ""
+read -rp "Enter SLA name: " SLA_NAME
+
+if [[ -z "$SLA_NAME" ]]; then
+  echo "Error: SLA name cannot be empty." >&2; exit 1
+fi
+
+# ==============================================================================
+# CREATE SLA DOMAIN
+# ==============================================================================
+echo ""
+echo "Creating SLA domain '$SLA_NAME'..."
+
+MUTATION="mutation {
+  createGlobalSla(input: {
+    name: \"$SLA_NAME\"
+    objectTypes: [VSPHERE_OBJECT_TYPE, MSSQL_OBJECT_TYPE]
+    snapshotSchedule: {
+      daily: {
+        basicSchedule: { frequency: 1 retention: 7 retentionUnit: DAYS }
+      }
+    }
+  }) {
+    name
+    id
+  }
+}"
+
+RESPONSE=$(curl --silent -X POST \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $RSC_TOKEN" \
-  -d "{\"query\": \"$query\"}" \
-  https://rubrik-rcf-86506.my.rubrik.com/api/graphql
+  -d "$(jq -n --arg q "$MUTATION" '{query: $q}')" \
+  "https://$RSC_FQDN/api/graphql")
+
+if echo "$RESPONSE" | jq -e '.errors' &>/dev/null; then
+  echo "Error: API returned errors:" >&2
+  echo "$RESPONSE" | jq '.errors' >&2
+  exit 1
+fi
+
+SLA_ID=$(echo "$RESPONSE" | jq -r '.data.createGlobalSla.id // empty')
+
+if [[ -z "$SLA_ID" ]]; then
+  echo "Error: SLA creation failed — no ID returned." >&2
+  echo "$RESPONSE" | jq '.' >&2
+  exit 1
+fi
+
+echo "SLA domain created successfully."
+echo "$RESPONSE" | jq '.data.createGlobalSla'
