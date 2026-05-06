@@ -1,0 +1,25 @@
+#!/bin/bash
+
+export RSC_FQDN="rubrik-rcf-86506.my.rubrik.com"
+export RSC_CLIENT_ID="client|019be083-fde4-7a48-8fdf-a793cb0c08ec"
+export RSC_CLIENT_SECRET="zEhKZ8nPQdT0dqf7F8B5hZrsiJPnlylqFFJMKKNcDGKAC57lMeCeB3-u2aM5WE5O"
+
+RSC_TOKEN=$(curl --silent --location "https://$RSC_FQDN/api/client_token" \
+  --header "Content-Type: application/x-www-form-urlencoded" \
+  --data "client_id=$RSC_CLIENT_ID&client_secret=$RSC_CLIENT_SECRET&grant_type=client_credentials" | jq -r '.access_token')
+
+export RSC_TOKEN
+
+# Token im Terminal ausgeben
+echo "Token is:"
+echo $RSC_TOKEN
+
+# RSC_TOKEN="YOUR_RSC_ACCESS_TOKEN"
+query="query { slaDomains { nodes { id name ... on GlobalSlaReply { isDefault description snapshotSchedule { minute { basicSchedule { frequency retention retentionUnit } } hourly { basicSchedule { frequency retention retentionUnit } } daily { basicSchedule { frequency retention retentionUnit } } weekly { basicSchedule { frequency retention retentionUnit } dayOfWeek } monthly { basicSchedule { frequency retention retentionUnit } dayOfMonth } quarterly { basicSchedule { frequency retention retentionUnit } dayOfQuarter quarterStartMonth } yearly { basicSchedule { frequency retention retentionUnit } dayOfYear yearStartMonth } } archivalSpecs { threshold thresholdUnit storageSetting { id name groupType } archivalTieringSpec { coldStorageClass minAccessibleDurationInSeconds isInstantTieringEnabled } } backupWindows { durationInHours startTimeAttributes { hour minute } } firstFullBackupWindows { durationInHours startTimeAttributes { dayOfWeek { day } hour minute } } replicationSpecsV2 { replicationLocalRetentionDuration { duration unit } cascadingArchivalSpecs { archivalTieringSpec { coldStorageClass shouldTierExistingSnapshots minAccessibleDurationInSeconds isInstantTieringEnabled } archivalLocation { id name targetType ... on RubrikManagedAwsTarget { immutabilitySettings { lockDurationDays } } ... on RubrikManagedAzureTarget { immutabilitySettings { lockDurationDays } } ... on RubrikManagedNfsTarget { host } ... on CdmManagedAwsTarget { immutabilitySettings { lockDurationDays } } ... on CdmManagedAzureTarget { immutabilitySettings { lockDurationDays } } } frequency archivalThreshold { duration unit } } retentionDuration { duration unit } cluster { id name } targetMapping { id name } awsTarget { accountId accountName region } azureTarget { region } } localRetentionLimit { duration unit } objectSpecificConfigs { sapHanaConfig { incrementalFrequency { duration unit } differentialFrequency { duration unit } logRetention { duration unit } } awsRdsConfig { logRetention { duration } } vmwareVmConfig { logRetentionSeconds } } clusterToSyncStatusMap { clusterUuid slaSyncStatus } objectTypes upgradeInfo { eligibility { isEligible ineligibilityReason } latestUpgrade { status msg } } allOrgsHavingAccess { id name } ownerOrg { id name } isRetentionLockedSla } ... on ClusterSlaDomain { cdmId name cluster { name version } snapshotSchedule { minute { basicSchedule { frequency retention retentionUnit } } hourly { basicSchedule { frequency retention retentionUnit } } daily { basicSchedule { frequency retention retentionUnit } } weekly { basicSchedule { frequency retention retentionUnit } dayOfWeek } monthly { basicSchedule { frequency retention retentionUnit } dayOfMonth } quarterly { basicSchedule { frequency retention retentionUnit } dayOfQuarter quarterStartMonth } yearly { basicSchedule { frequency retention retentionUnit } dayOfYear yearStartMonth } } backupWindows { durationInHours startTimeAttributes { hour minute } } firstFullBackupWindows { durationInHours startTimeAttributes { dayOfWeek { day } hour minute } } archivalSpec { threshold thresholdUnit archivalLocationName archivalLocationId archivalTieringSpec { coldStorageClass minAccessibleDurationInSeconds isInstantTieringEnabled } } replicationSpecsV2 { retentionDuration { duration unit } cluster { id name } targetMapping { id name } awsTarget { accountId accountName region } azureTarget { region } } localRetentionLimit { duration unit } upgradeInfo { eligibility { isEligible ineligibilityReason } latestUpgrade { status msg } } ownerOrg { id name } isRetentionLockedSla } } pageInfo { endCursor hasNextPage } } }"
+
+# Execute the GraphQL query with curl
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $RSC_TOKEN" \
+  -d "{\"query\": \"$query\"}" \
+  https://rubrik-rcf-86506.my.rubrik.com/api/graphql

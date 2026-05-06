@@ -1,0 +1,4 @@
+.env
+.rsc_token_cache
+.DS_Store
+*.kdb

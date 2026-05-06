@@ -1,0 +1,8 @@
+query {
+    chatbots {
+        nodes {
+            name
+            id
+        }
+    }
+}

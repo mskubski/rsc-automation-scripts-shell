@@ -1,0 +1,22 @@
+query {
+  vSphereComputeClusters(filter: {
+    field: NAME_EXACT_MATCH texts: "foo"
+    }) {
+    nodes {
+      name
+      id
+      logicalPath {
+        name
+        fid
+        objectType
+      }
+      descendantConnection(typeFilter: [VSphereHost,VSphereNetwork,VSphereDatastore,VSphereResourcePool]) {
+        nodes {
+          name
+          id
+          objectType
+        }
+      }
+    }
+  }
+}
