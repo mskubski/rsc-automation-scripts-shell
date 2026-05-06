@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A collection of Bash scripts for automating operations against the **Rubrik Security Cloud (RSC) GraphQL API**. Scripts use `curl` + `jq` throughout. The `Rubrik-Security-Cloud-API/` subdirectory is a reference library of canonical `.gql` queries and matching `.sh`/`.ps1` wrappers organised by product area.
+A collection of Bash scripts for automating operations against the **Rubrik Security Cloud (RSC) GraphQL API**. Scripts use `curl` + `jq` throughout.
 
 ## Credentials
 
-All new scripts must load credentials from `.env` (never hardcode them):
+All scripts load credentials from `.env` (never hardcode them):
 
 ```bash
 source "$(dirname "$0")/.env"
@@ -26,79 +26,108 @@ Variables provided by `.env`:
 
 ## Authentication pattern
 
-Every script must obtain a bearer token before calling the API:
+All scripts use the shared `rsc_auth.sh` helper for token caching (Rubrik allows max 10 active tokens per service account):
 
 ```bash
-TOKEN_RESPONSE=$(curl --silent --location "$RSC_TOKEN_URI" \
-  --header "Content-Type: application/x-www-form-urlencoded" \
-  --data "client_id=$RSC_CLIENT_ID&client_secret=$RSC_CLIENT_SECRET&grant_type=client_credentials")
-
-RSC_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
-
-if [[ -z "$RSC_TOKEN" || "$RSC_TOKEN" == "null" ]]; then
-  echo "Error: Failed to obtain access token." >&2
-  exit 1
-fi
+source "$SCRIPT_DIR/rsc_auth.sh"
+get_rsc_token || exit 1
+# RSC_TOKEN is now set in the environment
 ```
 
-## GraphQL call pattern
+`rsc_auth.sh` decodes the JWT expiry and reuses a cached token from `.rsc_token_cache` as long as it has more than 5 minutes remaining. A new token is only requested when needed.
 
-All API calls go to `https://$RSC_FQDN/api/graphql` via POST. Use `jq -n` to safely build the JSON payload when variables are embedded in the query:
+## GraphQL call patterns
 
+**Standard query (exits on error):**
 ```bash
-JSON_PAYLOAD=$(jq -n --arg q "$QUERY" '{query: $q}')
-RESPONSE=$(curl --silent -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $RSC_TOKEN" \
-  -d "$JSON_PAYLOAD" \
-  "https://$RSC_FQDN/api/graphql")
+gql() {
+  local response
+  response=$(curl --silent -X POST \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $RSC_TOKEN" \
+    -d "$(jq -n --arg q "$1" '{query: $q}')" \
+    "https://$RSC_FQDN/api/graphql")
+  if echo "$response" | jq -e '.errors' &>/dev/null; then
+    echo "API error:" >&2; echo "$response" | jq '.errors' >&2; exit 1
+  fi
+  echo "$response"
+}
 ```
 
-For inline string mutations that embed IDs directly, escape inner quotes with `\\\"`.
+**With GraphQL variables (use for mutations with complex inputs to avoid escaping):**
+```bash
+gql_vars() {
+  local response
+  response=$(curl --silent -X POST \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $RSC_TOKEN" \
+    -d "$(jq -n --arg q "$1" --argjson v "$2" '{query: $q, variables: $v}')" \
+    "https://$RSC_FQDN/api/graphql")
+  if echo "$response" | jq -e '.errors' &>/dev/null; then
+    echo "API error:" >&2; echo "$response" | jq '.errors' >&2; exit 1
+  fi
+  echo "$response"
+}
+```
+
+**Raw (no error exit — for retry logic):**
+```bash
+gql_vars_raw() {
+  curl --silent -X POST \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $RSC_TOKEN" \
+    -d "$(jq -n --arg q "$1" --argjson v "$2" '{query: $q, variables: $v}')" \
+    "https://$RSC_FQDN/api/graphql"
+}
+```
 
 ## Script standards (for new scripts)
 
 - Start with `set -euo pipefail`
-- `source .env` with existence check
-- Validate required env vars with `: "${VAR:?message}"`
+- Source `.env` with existence check, then validate vars with `: "${VAR:?message}"`
 - Check for `jq` with `command -v jq`
-- Validate token is non-null before proceeding
-- Quote all variable expansions: `echo "$VAR"` not `echo $VAR`
-- Print formatted JSON with `echo "$RESPONSE" | jq .`
-
-## Reference library (`Rubrik-Security-Cloud-API/`)
-
-Each `.gql` file is the canonical query/mutation. The paired `.sh` wraps it with `curl`. Look here first before writing new queries:
-
-| Directory | Coverage |
-|---|---|
-| `Data-Protection/Data-Center/VMware-vSphere/` | VM snapshots, export, live mount, file recovery |
-| `Data-Protection/SLA-Domains/` | SLA CRUD |
-| `Data-Protection/Snapshots/` | Snapshot assignment, deletion, legal hold |
-| `Observability/` | Events, metrics, reports |
-| `SaaS-App-Protection/microsoft-m365/` | M365 mailboxes, OneDrive, Teams, SharePoint |
-| `Threat-Analytics/` | Anomaly detection, threat hunt (YARA), threat monitoring |
-| `System-Settings/` | Users, certificates |
-| `Annapurna/` | LangChain/Python AI integration with RSC |
+- Use `rsc_auth.sh` for authentication — never inline the token request
+- Define `gql()` / `gql_vars()` / `gql_vars_raw()` helpers as needed
+- Quote all variable expansions
 
 ## Key GraphQL entry points
 
-- **List VMs**: `vSphereVmNewConnection` — filter by `IS_RELIC: false`, `IS_REPLICATED: false`; returns `id`, `name`, `effectiveSlaDomain { id name }`
-- **On-demand VM backup**: `vsphereBulkOnDemandSnapshot(input: { config: { vms: ["<id>"] slaId: "<id>" } })`
-- **List clusters**: `clusterConnection(filter: {})` — returns capacity metrics and node info
-- **SLA by name**: `slaDomains(filter: {field: NAME text: "…"})` 
-- **SLA by ID**: `slaDomain(id: "…")` — full policy detail including replication and archival specs
+- **List VMs**: `vSphereVmNewConnection(filter: [{field: IS_RELIC texts: "false"}, {field: IS_REPLICATED texts: "false"}])` → `id name effectiveSlaDomain { id name } powerStatus`
+- **VM snapshots**: `vSphereVmNew(fid: "<id>") { snapshotConnection { nodes { id date isOnDemandSnapshot } } }`
+- **On-demand backup**: `vsphereBulkOnDemandSnapshot(input: { config: { vms: ["<id>"] slaId: "<id>" } })`
+- **Backup status**: `vSphereVMAsyncRequestStatus(id: "<jobId>" clusterUuid: "<clusterId>") { status progress endTime }`
+- **VM in-place restore**: `vsphereVmInitiateInPlaceRecovery(input: { id: "<vmId>" config: { requiredRecoveryParameters: { snapshotId: "<snapId>" } } })`
+- **File restore**: `vsphereVmRecoverFilesNew(input: $input)` via GraphQL variables — config includes `shouldUseAgent`, `restoreConfig`, optional `guestCredentials`
+- **Browse snapshot files**: `browseSnapshotFileConnection(snapshotFid: "<id>" path: "<path>" first: 100)`
+- **Restore activity status**: `activitySeriesConnection(filters: { objectFid: "<vmId>" lastActivityType: [Recovery] lastUpdatedTimeGt: "<time>" })`
+- **List clusters**: `clusterConnection(filter: {})` — includes `clusterNodeConnection.nodes.interfaceCidrs { interfaceName cidr }`
+- **SLA by name**: `slaDomains(filter: {field: NAME text: "…"}) { nodes { id name } }`
+- **Create SLA**: `createGlobalSla(input: { name objectTypes snapshotSchedule { daily { basicSchedule { frequency retention retentionUnit } } } })`
 - **Assign SLA**: `assignSla(input: { slaDomainAssignType: protectWithSlaId slaOptionalId: "…" objectIds: ["…"] })`
+- **Ruby AI chatbots**: `chatbots { nodes { name id } }` → POST `/api/annapurna/<id>/retrieve`
 
-## Existing scripts (status)
+## File restore: Windows vs Linux paths
 
-| Script | Uses `.env` | Notes |
-|---|---|---|
-| `createSLAenv.sh` | Yes | Prompts for SLA name; reference implementation |
-| `startVMbackup.sh` | Yes | Lists VMs interactively, triggers on-demand backup with object's own SLA |
-| `createSLA.sh` | No | Legacy — hardcoded creds |
-| `createSLAandAsign2VM.sh` | No | Legacy — hardcoded creds |
-| `getAllclusters.sh` | No | Legacy — hardcoded creds |
-| `getAllclustersWrite2CSV.sh` | No | Legacy — writes `./clusters.csv` |
-| `slaDomainfromRSC.sh` | No | Broken — missing auth block; hardcoded SLA UUID |
-| `slaDomainsByNameGet.sh` | No | Legacy — hardcoded search term `"foo"` |
+Rubrik exposes Windows paths as `/C:/foo/bar`. The restore destination must be computed per OS:
+
+- Linux: `/etc/passwd` → restorePath `/restore/etc`
+- Windows: `/C:/Files/report.docx` → restorePath `C:/restore/Files`
+
+RBS (Rubrik Backup Service) is tried first without credentials. If RSC returns error `RBK20100125`, fall back to `guestCredentials: { username, password }`.
+
+## Existing scripts
+
+| Script | Purpose |
+|---|---|
+| `rsc_auth.sh` | Shared token cache helper — source and call `get_rsc_token` |
+| `createSLAenv.sh` | Create global SLA — prompts for name |
+| `createSLA.sh` | Create global SLA — prompts for name |
+| `createSLAandAsign2VM.sh` | Create/find SLA and assign to a VM — prompts for both names |
+| `startVMbackup.sh` | Interactive VM selection, triggers on-demand backup |
+| `startVMbackupWithStatus.sh` | Same as above, polls and streams backup status |
+| `getAllclusters.sh` | List all clusters with capacity metrics — JSON output |
+| `getAllclustersWrite2CSV.sh` | Same cluster query — writes `./clusters.csv` |
+| `getClusterNetworkInfo.sh` | Cluster node IPs, interfaces, VLAN info (parsed from subinterface names) |
+| `askruby.sh` | Query Ruby AI assistant via Annapurna API — requires Annapurna license |
+| `restoreVM.sh` | Interactive VM in-place restore — monitors via `activitySeriesConnection` |
+| `filerestoreVM.sh` | Interactive file browser + file-level restore — RBS first, guest creds fallback |
