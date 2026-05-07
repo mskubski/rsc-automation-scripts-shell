@@ -97,6 +97,10 @@ gql_vars_raw() {
 - **On-demand backup**: `vsphereBulkOnDemandSnapshot(input: { config: { vms: ["<id>"] slaId: "<id>" } })`
 - **Backup status**: `vSphereVMAsyncRequestStatus(id: "<jobId>" clusterUuid: "<clusterId>") { status progress endTime }`
 - **VM in-place restore**: `vsphereVmInitiateInPlaceRecovery(input: { id: "<vmId>" config: { requiredRecoveryParameters: { snapshotId: "<snapId>" } } })`
+- **VM export to new VM**: `vsphereVmExportSnapshotV2(input: $input)` via GraphQL variables — input `id` = snapshot FID, config includes `hostId`, `datastoreId`, `vmName`, `powerOn`, `keepMacAddresses`, `disableNetwork`, `shouldRecoverTags`, optional `networkDevices: [{networkId}]`
+- **List ESXi hosts**: `vSphereHostNewConnection { nodes { id name } }`
+- **Host datastores + networks**: `vSphereHostNew(fid: "<hostId>") { datastoreConnection { nodes { id name capacityBytes freeSpaceBytes } } networkConnection { nodes { id name } } }`
+- **VM current host**: `vSphereVmNew(fid: "<vmId>") { currentHost { id name } }`
 - **File restore**: `vsphereVmRecoverFilesNew(input: $input)` via GraphQL variables — config includes `shouldUseAgent`, `restoreConfig`, optional `guestCredentials`
 - **Browse snapshot files**: `browseSnapshotFileConnection(snapshotFid: "<id>" path: "<path>" first: 100)`
 - **Restore activity status**: `activitySeriesConnection(filters: { objectFid: "<vmId>" lastActivityType: [Recovery] lastUpdatedTimeGt: "<time>" })`
@@ -130,4 +134,5 @@ RBS (Rubrik Backup Service) is tried first without credentials. If RSC returns e
 | `getClusterNetworkInfo.sh` | Cluster node IPs, interfaces, VLAN info (parsed from subinterface names) |
 | `askruby.sh` | Query Ruby AI assistant via Annapurna API — requires Annapurna license |
 | `restoreVM.sh` | Interactive VM in-place restore — monitors via `activitySeriesConnection` |
+| `restoreVMwithExport.sh` | Interactive VM export to new VM — prompts for host, datastore, network, VM name |
 | `filerestoreVM.sh` | Interactive file browser + file-level restore — RBS first, guest creds fallback |

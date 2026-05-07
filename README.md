@@ -263,6 +263,71 @@ The script exits with code `0` on success (prints start/end time and Job ID) or 
 
 ---
 
+### `restoreVMwithExport.sh` *(current)*
+
+Interactively exports a VMware vSphere VM snapshot to a new VM (non-destructive). Unlike in-place recovery, the original VM is not modified — a new VM is created from the selected snapshot.
+
+**Uses:** `.env` file
+
+**Usage:**
+```bash
+bash restoreVMwithExport.sh
+```
+
+**Flow:**
+
+1. Lists all non-relic VMs with SLA and power state — user selects by number.
+2. Fetches all snapshots for the selected VM, sorted newest first (max 30 shown) — user selects by number.
+3. Lists available ESXi hosts — user selects compute target (current host is marked and pre-selected by default).
+4. Lists datastores on the selected host with free/total capacity — user selects (default: first in list).
+5. Lists networks on the selected host — user selects, or enters `0` to keep original network assignments (default: keep original).
+6. Prompts for new VM name (default: original VM name) and power-on preference (default: yes).
+7. Displays a confirmation summary and requires the user to type `YES` before proceeding.
+8. Initiates export via `vsphereVmExportSnapshotV2`.
+9. Polls every 15 seconds and streams live status until the export completes.
+
+**Export parameters:**
+
+| Parameter | Prompt | Default |
+|-----------|--------|---------|
+| Host | Select from numbered list | Current host of the source VM |
+| Datastore | Select from numbered list (shows Free / Capacity) | First in list |
+| Network | Select from numbered list, or `0` to keep original | Keep original |
+| VM name | Free text | Original VM name |
+| Power on | `[Y/n]` | Yes |
+
+> **Note on multi-NIC VMs:** If a specific network is selected, it is applied to all network adapters of the exported VM. For VMs with multiple NICs that require different network assignments per adapter, use the RSC GUI instead.
+
+**Status monitoring:**
+
+Uses `activitySeriesConnection` (filtered by VM object ID and activity type `Recovery`) as the primary status source, supplemented by `vSphereVMAsyncRequestStatus` for progress % and timestamps.
+
+| Activity status | Displayed message |
+|----------------|-------------------|
+| `Queued` | `Queued` |
+| `Running` | `Exporting... X%` |
+| `Success / TaskSuccess` | `Export complete` |
+| `Failure / TaskFailure` | `Failed` |
+| `Canceled` | `Canceled` |
+
+The script exits with code `0` on success or code `1` on failure or cancellation. A full summary is printed on completion:
+
+```
+Export completed successfully.
+  Source VM   : my-vm-01
+  Snapshot    : 2026-05-01T03:57:34.000Z
+  Cluster     : Rubrik-Demo1
+  New VM name : my-vm-01-export
+  Host        : esx-host-01.lab.local
+  Datastore   : DS-SSD-01
+  Network     : VM Network
+  Power on    : true
+  Duration    : 4m 32s
+  Job ID      : EXPORT_VSPHERE_...
+```
+
+---
+
 ### `filerestoreVM.sh` *(current)*
 
 Interactively browses a VMware vSphere VM snapshot file system and restores selected files and/or directories to a `/restore` folder on the source VM, preserving the original path structure. Supports both Windows and Linux VMs.
