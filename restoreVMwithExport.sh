@@ -213,15 +213,43 @@ SNAP_DATE=$(echo "$SORTED_SNAPS" | jq -r ".[$SNAP_IDX].date")
 # 4. SELECT DATASTORE
 # ==============================================================================
 echo ""
-echo "Fetching available datastores..."
+echo "Fetching datastores..."
 
-# Try top-level datastore connection (covers all datastores visible to RSC)
-DS_RESP=$(gql_soft "query {
-  vSphereDatastoreNewConnection {
-    nodes { id name capacityBytes freeSpaceBytes }
+DS_NODES="[]"
+
+# Strategy 1: get the VM's physical path → extract ESXi host FID → query its datastores
+PHYS_RESP=$(gql_soft "query {
+  vSphereVmNew(fid: \"$VM_ID\") {
+    physicalPath { fid name objectType }
   }
 }")
-DS_NODES=$(echo "$DS_RESP" | jq 'if .errors then [] else (.data.vSphereDatastoreNewConnection.nodes // []) end')
+PHYS_HOST_FID=$(echo "$PHYS_RESP" | jq -r '
+  if .errors then "" else
+    ((.data.vSphereVmNew.physicalPath // [])[]
+     | select(.objectType | ascii_downcase | test("host"))
+     | .fid)
+  end
+' 2>/dev/null | head -1)
+
+if [[ -n "$PHYS_HOST_FID" ]]; then
+  DS_RESP=$(gql_soft "query {
+    vSphereHostNew(fid: \"$PHYS_HOST_FID\") {
+      datastoreConnection { nodes { id name capacityBytes freeSpaceBytes } }
+    }
+  }")
+  DS_NODES=$(echo "$DS_RESP" | jq 'if .errors then [] else (.data.vSphereHostNew.datastoreConnection.nodes // []) end')
+fi
+
+# Strategy 2: top-level datastore connection
+if [[ "$(echo "$DS_NODES" | jq 'length')" -eq 0 ]]; then
+  DS_RESP=$(gql_soft "query {
+    vSphereDatastoreNewConnection {
+      nodes { id name capacityBytes freeSpaceBytes }
+    }
+  }")
+  DS_NODES=$(echo "$DS_RESP" | jq 'if .errors then [] else (.data.vSphereDatastoreNewConnection.nodes // []) end')
+fi
+
 DS_COUNT=$(echo "$DS_NODES" | jq 'length')
 
 EXPORT_DS_ID=""
@@ -255,16 +283,19 @@ if [[ "$DS_COUNT" -gt 0 ]]; then
   EXPORT_DS_NAME=$(echo "$DS_NODES" | jq -r ".[$DS_IDX].name")
 
 else
-  echo "  Datastores cannot be listed via API."
-  echo "  You can find the datastore ID in the RSC UI under vSphere → Datastores."
+  # datastoreId is required by RSC — must be entered manually
   echo ""
-  read -rp "  Enter datastore ID (or press Enter to let RSC auto-select): " MANUAL_DS_ID
-  if [[ -n "$MANUAL_DS_ID" ]]; then
-    EXPORT_DS_ID="$MANUAL_DS_ID"
-    EXPORT_DS_NAME="$MANUAL_DS_ID"
-  else
-    EXPORT_DS_NAME="(RSC auto-select)"
-  fi
+  echo "  Datastores cannot be listed via API."
+  echo "  Find the ID in the RSC UI: Infrastructure → vSphere → Datastores"
+  echo "  → click the datastore → copy the ID from the URL (last path segment)."
+  echo ""
+  while [[ -z "$EXPORT_DS_ID" ]]; do
+    read -rp "  Datastore ID (required): " EXPORT_DS_ID
+    if [[ -z "$EXPORT_DS_ID" ]]; then
+      echo "  Error: datastoreId is required for export. Cannot proceed without it." >&2
+    fi
+  done
+  EXPORT_DS_NAME="$EXPORT_DS_ID"
 fi
 
 # ==============================================================================
@@ -370,25 +401,24 @@ MUTATION='mutation ExportSnapshot($input: VsphereVmExportSnapshotV2Input!) {
   }
 }'
 
-# Build config — only include datastoreId and networkDevices if values are available
+# Field names confirmed from RSC API error: ExportSnapshotJobConfigV2Input
 CONFIG=$(jq -n \
-  --arg vmName      "$NEW_VM_NAME" \
-  --argjson powerOn "$POWER_ON" \
+  --arg   newVmName  "$NEW_VM_NAME" \
+  --arg   datastoreId "$EXPORT_DS_ID" \
+  --argjson shouldPowerOn          "$POWER_ON" \
+  --argjson shouldKeepMacAddresses false \
+  --argjson shouldDisableNetwork   false \
   '{
-    vmName:            $vmName,
-    powerOn:           $powerOn,
-    keepMacAddresses:  false,
-    disableNetwork:    false,
-    shouldRecoverTags: true
+    newVmName:              $newVmName,
+    datastoreId:            $datastoreId,
+    shouldPowerOn:          $shouldPowerOn,
+    shouldKeepMacAddresses: $shouldKeepMacAddresses,
+    shouldDisableNetwork:   $shouldDisableNetwork
   }')
-
-if [[ -n "$EXPORT_DS_ID" ]]; then
-  CONFIG=$(echo "$CONFIG" | jq --arg id "$EXPORT_DS_ID" '. + {datastoreId: $id}')
-fi
 
 if [[ -n "$EXPORT_NET_ID" ]]; then
   CONFIG=$(echo "$CONFIG" | jq --arg netId "$EXPORT_NET_ID" \
-    '. + {networkDevices: [{networkId: $netId}]}')
+    '. + {networkInterfaces: [{networkId: $netId}]}')
 fi
 
 VARIABLES=$(jq -n \
