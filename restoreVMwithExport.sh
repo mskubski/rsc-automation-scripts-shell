@@ -325,9 +325,9 @@ if [[ -z "$NEW_VM_NAME" ]]; then NEW_VM_NAME="$VM_NAME"; fi
 echo ""
 read -rp "Power on VM after export? [Y/n]: " POWER_ON_INPUT
 POWER_ON=true
-if [[ "${POWER_ON_INPUT,,}" == "n" || "${POWER_ON_INPUT,,}" == "no" ]]; then
-  POWER_ON=false
-fi
+case "$POWER_ON_INPUT" in
+  n|N|no|NO|No) POWER_ON=false ;;
+esac
 
 # ==============================================================================
 # 9. CONFIRM
