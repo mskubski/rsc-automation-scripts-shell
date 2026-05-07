@@ -97,9 +97,9 @@ gql_vars_raw() {
 - **On-demand backup**: `vsphereBulkOnDemandSnapshot(input: { config: { vms: ["<id>"] slaId: "<id>" } })`
 - **Backup status**: `vSphereVMAsyncRequestStatus(id: "<jobId>" clusterUuid: "<clusterId>") { status progress endTime }`
 - **VM in-place restore**: `vsphereVmInitiateInPlaceRecovery(input: { id: "<vmId>" config: { requiredRecoveryParameters: { snapshotId: "<snapId>" } } })`
-- **VM export to new VM**: `vsphereVmExportSnapshotV2(input: $input)` via GraphQL variables — input `id` = snapshot FID, config includes `hostId`, `datastoreId`, `vmName`, `powerOn`, `keepMacAddresses`, `disableNetwork`, `shouldRecoverTags`, optional `networkDevices: [{networkId}]`
-- **List ESXi hosts**: `vSphereHostNewConnection { nodes { id name } }`
-- **Host datastores + networks**: `vSphereHostNew(fid: "<hostId>") { datastoreConnection { nodes { id name capacityBytes freeSpaceBytes } } networkConnection { nodes { id name } } }`
+- **VM export to new VM**: `vsphereVmExportSnapshotV2(input: $input)` via GraphQL variables — input `id` = **VM FID** (not snapshot); snapshot goes in `config.requiredRecoveryParameters.snapshotId`; config also has `datastoreId` (String!, required), optional `hostId`, and `mountExportSnapshotJobCommonOptionsV2: {vmName, powerOn, keepMacAddresses, disableNetwork}`
+- **List ESXi hosts**: `vSphereHostNewConnection { nodes { id name } }` — use `vSphereHost(fid:)` (not `vSphereHostNew`) for single host queries
+- **Host datastores + networks**: `vSphereHost(fid: "<hostId>") { descendantConnection { nodes { id name objectType } } }` — filter by `objectType == "VSphereDatastore"` or `"VSphereNetwork"`
 - **VM current host**: `vSphereVmNew(fid: "<vmId>") { currentHost { id name } }`
 - **File restore**: `vsphereVmRecoverFilesNew(input: $input)` via GraphQL variables — config includes `shouldUseAgent`, `restoreConfig`, optional `guestCredentials`
 - **Browse snapshot files**: `browseSnapshotFileConnection(snapshotFid: "<id>" path: "<path>" first: 100)`

@@ -365,17 +365,21 @@ MUTATION='mutation ExportSnapshot($input: VsphereVmExportSnapshotV2Input!) {
   }
 }'
 
-# ExportSnapshotJobConfigV2Input confirmed fields (via schema introspection):
-#   datastoreId (String!, required)
-#   hostId (String, optional)
-#   mountExportSnapshotJobCommonOptionsV2 (MountExportSnapshotJobCommonOptionsV2Input):
-#     vmName, powerOn, keepMacAddresses, disableNetwork
+# VsphereVmExportSnapshotV2Input:
+#   id     = VM FID  (NOT snapshot — same pattern as vsphereVmInitiateInPlaceRecovery)
+#   config = ExportSnapshotJobConfigV2Input:
+#     datastoreId (String!, required)
+#     hostId (String, optional)
+#     requiredRecoveryParameters.snapshotId  — selects the snapshot
+#     mountExportSnapshotJobCommonOptionsV2: vmName, powerOn, keepMacAddresses, disableNetwork
 CONFIG=$(jq -n \
-  --arg  ds "$EXPORT_DS_ID" \
-  --arg  vm "$NEW_VM_NAME" \
+  --arg  ds   "$EXPORT_DS_ID" \
+  --arg  snap "$SNAP_ID" \
+  --arg  vm   "$NEW_VM_NAME" \
   --argjson po "$POWER_ON" \
   '{
     datastoreId: $ds,
+    requiredRecoveryParameters: { snapshotId: $snap },
     mountExportSnapshotJobCommonOptionsV2: {
       vmName: $vm,
       powerOn: $po,
@@ -390,9 +394,9 @@ if [[ -n "$HOST_FID" ]]; then
 fi
 
 VARIABLES=$(jq -n \
-  --arg     snapId "$SNAP_ID" \
+  --arg     vmId   "$VM_ID" \
   --argjson config "$CONFIG" \
-  '{input: {id: $snapId, config: $config}}')
+  '{input: {id: $vmId, config: $config}}')
 
 EXPORT_RESPONSE=$(gql_vars "$MUTATION" "$VARIABLES")
 
