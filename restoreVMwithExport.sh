@@ -210,63 +210,58 @@ SNAP_ID=$(echo "$SORTED_SNAPS"   | jq -r ".[$SNAP_IDX].id")
 SNAP_DATE=$(echo "$SORTED_SNAPS" | jq -r ".[$SNAP_IDX].date")
 
 # ==============================================================================
-# 4. SELECT DATASTORE
+# 4. SELECT DATASTORE  (also collects networks for step 5)
 # ==============================================================================
 echo ""
-echo "Fetching datastores..."
+echo "Fetching datastores and networks..."
 
+HOST_FID=""
+HOST_NAME=""
 DS_NODES="[]"
+NET_NODES="[]"
 
-# Strategy 1: get the VM's physical path → extract ESXi host FID → query its datastores
+# Get VM's ESXi host FID from physicalPath
 PHYS_RESP=$(gql_soft "query {
   vSphereVmNew(fid: \"$VM_ID\") {
     physicalPath { fid name objectType }
   }
 }")
-PHYS_HOST_FID=$(echo "$PHYS_RESP" | jq -r '
-  if .errors then "" else
-    ((.data.vSphereVmNew.physicalPath // [])[]
-     | select(.objectType | ascii_downcase | test("host"))
-     | .fid)
-  end
-' 2>/dev/null | head -1)
+HOST_FID=$(echo "$PHYS_RESP" | jq -r '
+  (.data.vSphereVmNew.physicalPath // [])[]
+  | select(.objectType == "VSphereHost")
+  | .fid' 2>/dev/null | head -1)
+HOST_NAME=$(echo "$PHYS_RESP" | jq -r '
+  (.data.vSphereVmNew.physicalPath // [])[]
+  | select(.objectType == "VSphereHost")
+  | .name' 2>/dev/null | head -1)
 
-if [[ -n "$PHYS_HOST_FID" ]]; then
-  DS_RESP=$(gql_soft "query {
-    vSphereHostNew(fid: \"$PHYS_HOST_FID\") {
-      datastoreConnection { nodes { id name capacityBytes freeSpaceBytes } }
+# descendantConnection returns all child objects including datastores and networks
+if [[ -n "$HOST_FID" ]]; then
+  DESC_RESP=$(gql_soft "query {
+    vSphereHost(fid: \"$HOST_FID\") {
+      descendantConnection { nodes { id name objectType } }
     }
   }")
-  DS_NODES=$(echo "$DS_RESP" | jq 'if .errors then [] else (.data.vSphereHostNew.datastoreConnection.nodes // []) end')
-fi
-
-# Strategy 2: top-level datastore connection
-if [[ "$(echo "$DS_NODES" | jq 'length')" -eq 0 ]]; then
-  DS_RESP=$(gql_soft "query {
-    vSphereDatastoreNewConnection {
-      nodes { id name capacityBytes freeSpaceBytes }
-    }
-  }")
-  DS_NODES=$(echo "$DS_RESP" | jq 'if .errors then [] else (.data.vSphereDatastoreNewConnection.nodes // []) end')
+  DS_NODES=$(echo "$DESC_RESP" | jq \
+    '[(.data.vSphereHost.descendantConnection.nodes // [])[] | select(.objectType == "VSphereDatastore")]')
+  NET_NODES=$(echo "$DESC_RESP" | jq \
+    '[(.data.vSphereHost.descendantConnection.nodes // [])[] | select(.objectType == "VSphereNetwork")]')
 fi
 
 DS_COUNT=$(echo "$DS_NODES" | jq 'length')
-
 EXPORT_DS_ID=""
 EXPORT_DS_NAME=""
 
 if [[ "$DS_COUNT" -gt 0 ]]; then
   echo ""
-  echo "Select datastore:"
+  echo "Select datastore (host: ${HOST_NAME:-unknown}):"
   echo "────────────────────────────────────────────────────────────────────"
-  printf "  %-4s %-36s %-12s %s\n" "No." "Datastore Name" "Free" "Capacity"
+  printf "  %-4s %s\n" "No." "Datastore Name"
   echo "────────────────────────────────────────────────────────────────────"
 
   for i in $(seq 0 $((DS_COUNT - 1))); do
     DS_NAME=$(echo "$DS_NODES" | jq -r ".[$i].name")
-    DS_FREE=$(echo "$DS_NODES" | jq -r ".[$i].freeSpaceBytes // 0 | . / 1073741824 | floor | tostring + \" GB\"")
-    DS_CAP=$(echo "$DS_NODES"  | jq -r ".[$i].capacityBytes  // 0 | . / 1073741824 | floor | tostring + \" GB\"")
-    printf "  %-4s %-36s %-12s %s\n" "$((i + 1))" "$DS_NAME" "$DS_FREE" "$DS_CAP"
+    printf "  %-4s %s\n" "$((i + 1))" "$DS_NAME"
   done
 
   echo "────────────────────────────────────────────────────────────────────"
@@ -279,75 +274,44 @@ if [[ "$DS_COUNT" -gt 0 ]]; then
   fi
 
   DS_IDX=$((DS_SEL - 1))
-  EXPORT_DS_ID=$(echo "$DS_NODES"   | jq -r ".[$DS_IDX].id")
+  EXPORT_DS_ID=$(echo "$DS_NODES" | jq -r ".[$DS_IDX].id")
   EXPORT_DS_NAME=$(echo "$DS_NODES" | jq -r ".[$DS_IDX].name")
 
 else
-  # datastoreId is required by RSC — must be entered manually
   echo ""
-  echo "  Datastores cannot be listed via API."
-  echo "  Find the ID in the RSC UI: Infrastructure → vSphere → Datastores"
-  echo "  → click the datastore → copy the ID from the URL (last path segment)."
+  echo "  No datastores found via API. Enter the RSC datastore ID manually."
+  echo "  (RSC UI: Infrastructure → vSphere → select datastore → copy ID from URL)"
   echo ""
   while [[ -z "$EXPORT_DS_ID" ]]; do
     read -rp "  Datastore ID (required): " EXPORT_DS_ID
-    if [[ -z "$EXPORT_DS_ID" ]]; then
-      echo "  Error: datastoreId is required for export. Cannot proceed without it." >&2
-    fi
+    [[ -z "$EXPORT_DS_ID" ]] && echo "  datastoreId is required." >&2
   done
   EXPORT_DS_NAME="$EXPORT_DS_ID"
 fi
 
 # ==============================================================================
-# 5. SELECT NETWORK (optional — 0 keeps original)
+# 5. SHOW NETWORKS (informational — original assignments kept by the export API)
 # ==============================================================================
-echo ""
-echo "Fetching available networks..."
-
-NET_RESP=$(gql_soft "query {
-  vSphereNetworkNewConnection {
-    nodes { id name }
-  }
-}")
-NET_NODES=$(echo "$NET_RESP" | jq 'if .errors then [] else (.data.vSphereNetworkNewConnection.nodes // []) end')
-NET_COUNT=$(echo "$NET_NODES" | jq 'length')
-
-EXPORT_NET_ID=""
 EXPORT_NET_NAME="(keep original)"
+NET_COUNT=$(echo "$NET_NODES" | jq 'length')
 
 if [[ "$NET_COUNT" -gt 0 ]]; then
   echo ""
-  echo "Select network (0 = keep original network assignments):"
+  echo "Networks available on host ${HOST_NAME:-}:"
   echo "────────────────────────────────────────────────────────────────────"
-  printf "  %-4s %s\n" "No." "Network Name"
-  echo "────────────────────────────────────────────────────────────────────"
-  printf "  %-4s %s\n" "0" "(keep original)"
-
   for i in $(seq 0 $((NET_COUNT - 1))); do
-    N_NAME=$(echo "$NET_NODES" | jq -r ".[$i].name")
-    printf "  %-4s %s\n" "$((i + 1))" "$N_NAME"
+    printf "  - %s\n" "$(echo "$NET_NODES" | jq -r ".[$i].name")"
   done
-
   echo "────────────────────────────────────────────────────────────────────"
-  echo ""
-  read -rp "Select network (number) [default: 0]: " NET_SEL
-  if [[ -z "$NET_SEL" ]]; then NET_SEL=0; fi
-
-  if ! [[ "$NET_SEL" =~ ^[0-9]+$ ]] || (( NET_SEL < 0 || NET_SEL > NET_COUNT )); then
-    echo "Error: Invalid selection." >&2; exit 1
-  fi
-
-  if [[ "$NET_SEL" -gt 0 ]]; then
-    NET_IDX=$((NET_SEL - 1))
-    EXPORT_NET_ID=$(echo "$NET_NODES"   | jq -r ".[$NET_IDX].id")
-    EXPORT_NET_NAME=$(echo "$NET_NODES" | jq -r ".[$NET_IDX].name")
-  fi
+  echo "  The exported VM will keep its original network assignments."
+  echo "  Reassign networks in vSphere after export if needed."
 else
+  echo ""
   echo "  (No networks found — original network assignments will be kept)"
 fi
 
 # ==============================================================================
-# 8. VM NAME AND POWER-ON PREFERENCE
+# 6. VM NAME AND POWER-ON PREFERENCE
 # ==============================================================================
 echo ""
 read -rp "New VM name [default: $VM_NAME]: " NEW_VM_NAME
@@ -361,7 +325,7 @@ case "$POWER_ON_INPUT" in
 esac
 
 # ==============================================================================
-# 9. CONFIRM
+# 7. CONFIRM
 # ==============================================================================
 echo ""
 echo "══════════════════════════════════════════════════════════════════"
@@ -384,7 +348,7 @@ if [[ "$CONFIRM" != "YES" ]]; then
 fi
 
 # ==============================================================================
-# 10. INITIATE EXPORT
+# 8. INITIATE EXPORT
 # ==============================================================================
 echo ""
 echo "Initiating export..."
@@ -401,83 +365,34 @@ MUTATION='mutation ExportSnapshot($input: VsphereVmExportSnapshotV2Input!) {
   }
 }'
 
-# Introspect schema to discover the actual field names for this RSC version.
-# RSC changes field names between releases — this avoids hard-coded guesses.
-SCHEMA_RESP=$(gql_soft "query {
-  cfgType: __type(name: \"ExportSnapshotJobConfigV2Input\") {
-    inputFields { name }
-  }
-  inpType: __type(name: \"VsphereVmExportSnapshotV2Input\") {
-    inputFields { name }
-  }
-}")
+# ExportSnapshotJobConfigV2Input confirmed fields (via schema introspection):
+#   datastoreId (String!, required)
+#   hostId (String, optional)
+#   mountExportSnapshotJobCommonOptionsV2 (MountExportSnapshotJobCommonOptionsV2Input):
+#     vmName, powerOn, keepMacAddresses, disableNetwork
+CONFIG=$(jq -n \
+  --arg  ds "$EXPORT_DS_ID" \
+  --arg  vm "$NEW_VM_NAME" \
+  --argjson po "$POWER_ON" \
+  '{
+    datastoreId: $ds,
+    mountExportSnapshotJobCommonOptionsV2: {
+      vmName: $vm,
+      powerOn: $po,
+      keepMacAddresses: false,
+      disableNetwork: false
+    }
+  }')
 
-CFG_FIELDS=$(echo "$SCHEMA_RESP" | jq -r '[.data.cfgType.inputFields // [] | .[].name] | join(" ")')
-INP_FIELDS=$(echo "$SCHEMA_RESP" | jq -r '[.data.inpType.inputFields // [] | .[].name] | join(" ")')
-
-has_cfg() { echo " $CFG_FIELDS " | grep -q " $1 "; }
-has_inp() { echo " $INP_FIELDS " | grep -q " $1 "; }
-
-# Start with the one confirmed-required field
-CONFIG=$(jq -n --arg ds "$EXPORT_DS_ID" '{datastoreId: $ds}')
-
-# VM name — try config level first, then track if it belongs at input level
-VM_NAME_INPUT_KEY=""
-for f in newVmName vmName name exportedVmName; do
-  if has_cfg "$f"; then
-    CONFIG=$(echo "$CONFIG" | jq --arg v "$NEW_VM_NAME" --arg k "$f" '. + {($k): $v}')
-    break
-  fi
-done
-# If not in config, check top-level input
-if ! (has_cfg "newVmName" || has_cfg "vmName" || has_cfg "name" || has_cfg "exportedVmName"); then
-  for f in newVmName vmName name exportedVmName; do
-    if has_inp "$f"; then VM_NAME_INPUT_KEY="$f"; break; fi
-  done
+# hostId is optional but tells RSC which host to use
+if [[ -n "$HOST_FID" ]]; then
+  CONFIG=$(echo "$CONFIG" | jq --arg h "$HOST_FID" '. + {hostId: $h}')
 fi
 
-# Power on
-for f in shouldPowerOn powerOn isPoweredOn; do
-  if has_cfg "$f"; then
-    CONFIG=$(echo "$CONFIG" | jq --argjson v "$POWER_ON" --arg k "$f" '. + {($k): $v}')
-    break
-  fi
-done
-
-# Keep MAC addresses
-for f in shouldKeepMacAddresses keepMacAddresses; do
-  if has_cfg "$f"; then
-    CONFIG=$(echo "$CONFIG" | jq --argjson v false --arg k "$f" '. + {($k): $v}')
-    break
-  fi
-done
-
-# Disable network
-for f in shouldDisableNetwork disableNetwork; do
-  if has_cfg "$f"; then
-    CONFIG=$(echo "$CONFIG" | jq --argjson v false --arg k "$f" '. + {($k): $v}')
-    break
-  fi
-done
-
-# Network interfaces (only if a network was selected)
-if [[ -n "$EXPORT_NET_ID" ]]; then
-  for f in networkInterfaces networkDevices; do
-    if has_cfg "$f"; then
-      CONFIG=$(echo "$CONFIG" | jq --arg id "$EXPORT_NET_ID" --arg k "$f" \
-        '. + {($k): [{networkId: $id}]}')
-      break
-    fi
-  done
-fi
-
-# Build input — VM name goes at top-level if not in config
-INPUT=$(jq -n --arg snapId "$SNAP_ID" --argjson config "$CONFIG" '{id: $snapId, config: $config}')
-if [[ -n "$VM_NAME_INPUT_KEY" ]]; then
-  INPUT=$(echo "$INPUT" | jq --arg v "$NEW_VM_NAME" --arg k "$VM_NAME_INPUT_KEY" '. + {($k): $v}')
-fi
-
-VARIABLES=$(jq -n --argjson input "$INPUT" '{input: $input}')
+VARIABLES=$(jq -n \
+  --arg     snapId "$SNAP_ID" \
+  --argjson config "$CONFIG" \
+  '{input: {id: $snapId, config: $config}}')
 
 EXPORT_RESPONSE=$(gql_vars "$MUTATION" "$VARIABLES")
 
@@ -493,7 +408,7 @@ echo "-> Export job started. Job ID: $JOB_ID"
 echo ""
 
 # ==============================================================================
-# 11. MONITOR — activitySeriesConnection (primary) + vSphereVMAsyncRequestStatus (secondary)
+# 9. MONITOR — activitySeriesConnection (primary) + vSphereVMAsyncRequestStatus (secondary)
 #
 # vSphereVMAsyncRequestStatus supplements progress % and timestamps.
 # activitySeriesConnection is the authoritative source for terminal state.
