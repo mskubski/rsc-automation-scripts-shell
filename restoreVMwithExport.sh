@@ -210,163 +210,75 @@ SNAP_ID=$(echo "$SORTED_SNAPS"   | jq -r ".[$SNAP_IDX].id")
 SNAP_DATE=$(echo "$SORTED_SNAPS" | jq -r ".[$SNAP_IDX].date")
 
 # ==============================================================================
-# 4. GET CURRENT VM PLACEMENT (for defaults)
+# 4. SELECT DATASTORE
 # ==============================================================================
 echo ""
-echo "Fetching current VM placement..."
+echo "Fetching available datastores..."
 
-VM_DETAILS=$(gql "query {
-  vSphereVmNew(fid: \"$VM_ID\") {
-    currentHost { id name }
+# Try top-level datastore connection (covers all datastores visible to RSC)
+DS_RESP=$(gql_soft "query {
+  vSphereDatastoreNewConnection {
+    nodes { id name capacityBytes freeSpaceBytes }
   }
 }")
+DS_NODES=$(echo "$DS_RESP" | jq 'if .errors then [] else (.data.vSphereDatastoreNewConnection.nodes // []) end')
+DS_COUNT=$(echo "$DS_NODES" | jq 'length')
 
-CURRENT_HOST_ID=$(echo "$VM_DETAILS"   | jq -r '.data.vSphereVmNew.currentHost.id   // ""')
-CURRENT_HOST_NAME=$(echo "$VM_DETAILS" | jq -r '.data.vSphereVmNew.currentHost.name // ""')
+EXPORT_DS_ID=""
+EXPORT_DS_NAME=""
 
-# ==============================================================================
-# 5. SELECT COMPUTE TARGET (ESXi host)
-# ==============================================================================
-echo ""
-echo "Fetching available ESXi hosts..."
-
-HOST_RESPONSE=$(gql_soft "query {
-  vSphereHostNewConnection(filter: [{field: IS_RELIC texts: [\"false\"]}]) {
-    nodes { id name }
-  }
-}")
-
-HOST_NODES=$(echo "$HOST_RESPONSE" | jq '.data.vSphereHostNewConnection.nodes // []')
-HOST_COUNT=$(echo "$HOST_NODES" | jq 'length')
-
-EXPORT_HOST_ID=""
-EXPORT_HOST_NAME=""
-
-if [[ "$HOST_COUNT" -gt 0 ]]; then
+if [[ "$DS_COUNT" -gt 0 ]]; then
   echo ""
-  echo "Select compute target (ESXi host):"
+  echo "Select datastore:"
   echo "────────────────────────────────────────────────────────────────────"
-  printf "  %-4s %s\n" "No." "Host Name"
+  printf "  %-4s %-36s %-12s %s\n" "No." "Datastore Name" "Free" "Capacity"
   echo "────────────────────────────────────────────────────────────────────"
 
-  DEFAULT_HOST_SEL=1
-  for i in $(seq 0 $((HOST_COUNT - 1))); do
-    H_ID=$(echo "$HOST_NODES"   | jq -r ".[$i].id")
-    H_NAME=$(echo "$HOST_NODES" | jq -r ".[$i].name")
-    MARKER=""
-    if [[ "$H_ID" == "$CURRENT_HOST_ID" ]]; then
-      MARKER=" (current)"
-      DEFAULT_HOST_SEL=$((i + 1))
-    fi
-    printf "  %-4s %s%s\n" "$((i + 1))" "$H_NAME" "$MARKER"
+  for i in $(seq 0 $((DS_COUNT - 1))); do
+    DS_NAME=$(echo "$DS_NODES" | jq -r ".[$i].name")
+    DS_FREE=$(echo "$DS_NODES" | jq -r ".[$i].freeSpaceBytes // 0 | . / 1073741824 | floor | tostring + \" GB\"")
+    DS_CAP=$(echo "$DS_NODES"  | jq -r ".[$i].capacityBytes  // 0 | . / 1073741824 | floor | tostring + \" GB\"")
+    printf "  %-4s %-36s %-12s %s\n" "$((i + 1))" "$DS_NAME" "$DS_FREE" "$DS_CAP"
   done
 
   echo "────────────────────────────────────────────────────────────────────"
   echo ""
-  read -rp "Select host (number) [default: $DEFAULT_HOST_SEL]: " HOST_SEL
+  read -rp "Select datastore (number) [default: 1]: " DS_SEL
+  if [[ -z "$DS_SEL" ]]; then DS_SEL=1; fi
 
-  if [[ -z "$HOST_SEL" ]]; then HOST_SEL=$DEFAULT_HOST_SEL; fi
-
-  if ! [[ "$HOST_SEL" =~ ^[0-9]+$ ]] || (( HOST_SEL < 1 || HOST_SEL > HOST_COUNT )); then
+  if ! [[ "$DS_SEL" =~ ^[0-9]+$ ]] || (( DS_SEL < 1 || DS_SEL > DS_COUNT )); then
     echo "Error: Invalid selection." >&2; exit 1
   fi
 
-  HOST_IDX=$((HOST_SEL - 1))
-  EXPORT_HOST_ID=$(echo "$HOST_NODES" | jq -r ".[$HOST_IDX].id")
-  EXPORT_HOST_NAME=$(echo "$HOST_NODES" | jq -r ".[$HOST_IDX].name")
-
-elif [[ -n "$CURRENT_HOST_ID" ]]; then
-  echo "  -> Host listing unavailable. Using current VM host: $CURRENT_HOST_NAME"
-  EXPORT_HOST_ID="$CURRENT_HOST_ID"
-  EXPORT_HOST_NAME="$CURRENT_HOST_NAME"
+  DS_IDX=$((DS_SEL - 1))
+  EXPORT_DS_ID=$(echo "$DS_NODES"   | jq -r ".[$DS_IDX].id")
+  EXPORT_DS_NAME=$(echo "$DS_NODES" | jq -r ".[$DS_IDX].name")
 
 else
-  echo "Error: Could not determine a compute target (no hosts found, current host unknown)." >&2; exit 1
+  echo "  Datastores cannot be listed via API."
+  echo "  You can find the datastore ID in the RSC UI under vSphere → Datastores."
+  echo ""
+  read -rp "  Enter datastore ID (or press Enter to let RSC auto-select): " MANUAL_DS_ID
+  if [[ -n "$MANUAL_DS_ID" ]]; then
+    EXPORT_DS_ID="$MANUAL_DS_ID"
+    EXPORT_DS_NAME="$MANUAL_DS_ID"
+  else
+    EXPORT_DS_NAME="(RSC auto-select)"
+  fi
 fi
 
 # ==============================================================================
-# 6. SELECT DATASTORE
+# 5. SELECT NETWORK (optional — 0 keeps original)
 # ==============================================================================
 echo ""
-echo "Fetching datastores..."
+echo "Fetching available networks..."
 
-# Try host-scoped query first, fall back to top-level inventory
-DS_RESP=$(gql_soft "query {
-  vSphereHostNew(fid: \"$EXPORT_HOST_ID\") {
-    datastoreConnection {
-      nodes { id name capacityBytes freeSpaceBytes }
-    }
-  }
-}")
-DS_NODES=$(echo "$DS_RESP" | jq 'if .errors then [] else (.data.vSphereHostNew.datastoreConnection.nodes // []) end')
-
-if [[ "$(echo "$DS_NODES" | jq 'length')" -eq 0 ]]; then
-  DS_RESP=$(gql "query {
-    vSphereDatastoreNewConnection {
-      nodes { id name capacityBytes freeSpaceBytes }
-    }
-  }")
-  DS_NODES=$(echo "$DS_RESP" | jq '.data.vSphereDatastoreNewConnection.nodes // []')
-fi
-
-DS_COUNT=$(echo "$DS_NODES" | jq 'length')
-
-if [[ "$DS_COUNT" -eq 0 ]]; then
-  echo "Error: No datastores found." >&2; exit 1
-fi
-
-echo ""
-echo "Select datastore:"
-echo "────────────────────────────────────────────────────────────────────"
-printf "  %-4s %-36s %-12s %s\n" "No." "Datastore Name" "Free" "Capacity"
-echo "────────────────────────────────────────────────────────────────────"
-
-for i in $(seq 0 $((DS_COUNT - 1))); do
-  DS_NAME=$(echo "$DS_NODES" | jq -r ".[$i].name")
-  DS_FREE=$(echo "$DS_NODES" | jq -r ".[$i].freeSpaceBytes // 0 | . / 1073741824 | floor | tostring + \" GB\"")
-  DS_CAP=$(echo "$DS_NODES"  | jq -r ".[$i].capacityBytes  // 0 | . / 1073741824 | floor | tostring + \" GB\"")
-  printf "  %-4s %-36s %-12s %s\n" "$((i + 1))" "$DS_NAME" "$DS_FREE" "$DS_CAP"
-done
-
-echo "────────────────────────────────────────────────────────────────────"
-echo ""
-read -rp "Select datastore (number) [default: 1]: " DS_SEL
-
-if [[ -z "$DS_SEL" ]]; then DS_SEL=1; fi
-
-if ! [[ "$DS_SEL" =~ ^[0-9]+$ ]] || (( DS_SEL < 1 || DS_SEL > DS_COUNT )); then
-  echo "Error: Invalid selection." >&2; exit 1
-fi
-
-DS_IDX=$((DS_SEL - 1))
-EXPORT_DS_ID=$(echo "$DS_NODES"   | jq -r ".[$DS_IDX].id")
-EXPORT_DS_NAME=$(echo "$DS_NODES" | jq -r ".[$DS_IDX].name")
-
-# ==============================================================================
-# 7. SELECT NETWORK (optional — 0 keeps original)
-# ==============================================================================
-echo ""
-echo "Fetching networks..."
-
-# Try host-scoped query first, fall back to top-level inventory
 NET_RESP=$(gql_soft "query {
-  vSphereHostNew(fid: \"$EXPORT_HOST_ID\") {
-    networkConnection {
-      nodes { id name }
-    }
+  vSphereNetworkNewConnection {
+    nodes { id name }
   }
 }")
-NET_NODES=$(echo "$NET_RESP" | jq 'if .errors then [] else (.data.vSphereHostNew.networkConnection.nodes // []) end')
-
-if [[ "$(echo "$NET_NODES" | jq 'length')" -eq 0 ]]; then
-  NET_RESP=$(gql_soft "query {
-    vSphereNetworkNewConnection {
-      nodes { id name }
-    }
-  }")
-  NET_NODES=$(echo "$NET_RESP" | jq 'if .errors then [] else (.data.vSphereNetworkNewConnection.nodes // []) end')
-fi
-
+NET_NODES=$(echo "$NET_RESP" | jq 'if .errors then [] else (.data.vSphereNetworkNewConnection.nodes // []) end')
 NET_COUNT=$(echo "$NET_NODES" | jq 'length')
 
 EXPORT_NET_ID=""
@@ -388,7 +300,6 @@ if [[ "$NET_COUNT" -gt 0 ]]; then
   echo "────────────────────────────────────────────────────────────────────"
   echo ""
   read -rp "Select network (number) [default: 0]: " NET_SEL
-
   if [[ -z "$NET_SEL" ]]; then NET_SEL=0; fi
 
   if ! [[ "$NET_SEL" =~ ^[0-9]+$ ]] || (( NET_SEL < 0 || NET_SEL > NET_COUNT )); then
@@ -429,7 +340,6 @@ echo "  Source VM   : $VM_NAME"
 echo "  Snapshot    : $SNAP_DATE"
 echo "  ──────────────────────────────────────────────────────────────"
 echo "  New VM name : $NEW_VM_NAME"
-echo "  Host        : $EXPORT_HOST_NAME"
 echo "  Datastore   : $EXPORT_DS_NAME"
 echo "  Network     : $EXPORT_NET_NAME"
 echo "  Power on    : $POWER_ON"
@@ -460,21 +370,21 @@ MUTATION='mutation ExportSnapshot($input: VsphereVmExportSnapshotV2Input!) {
   }
 }'
 
-# Build config — add networkDevices only if a specific network was chosen
+# Build config — only include datastoreId and networkDevices if values are available
 CONFIG=$(jq -n \
-  --arg hostId      "$EXPORT_HOST_ID" \
-  --arg datastoreId "$EXPORT_DS_ID" \
   --arg vmName      "$NEW_VM_NAME" \
   --argjson powerOn "$POWER_ON" \
   '{
-    hostId:            $hostId,
-    datastoreId:       $datastoreId,
     vmName:            $vmName,
     powerOn:           $powerOn,
     keepMacAddresses:  false,
     disableNetwork:    false,
     shouldRecoverTags: true
   }')
+
+if [[ -n "$EXPORT_DS_ID" ]]; then
+  CONFIG=$(echo "$CONFIG" | jq --arg id "$EXPORT_DS_ID" '. + {datastoreId: $id}')
+fi
 
 if [[ -n "$EXPORT_NET_ID" ]]; then
   CONFIG=$(echo "$CONFIG" | jq --arg netId "$EXPORT_NET_ID" \
@@ -611,7 +521,6 @@ while true; do
       echo "  Snapshot    : $SNAP_DATE"
       echo "  Cluster     : $CLUSTER_NAME"
       echo "  New VM name : $NEW_VM_NAME"
-      echo "  Host        : $EXPORT_HOST_NAME"
       echo "  Datastore   : $EXPORT_DS_NAME"
       echo "  Network     : $EXPORT_NET_NAME"
       echo "  Power on    : $POWER_ON"
