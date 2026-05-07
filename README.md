@@ -278,25 +278,23 @@ bash restoreVMwithExport.sh
 
 1. Lists all non-relic VMs with SLA and power state — user selects by number.
 2. Fetches all snapshots for the selected VM, sorted newest first (max 30 shown) — user selects by number.
-3. Lists available ESXi hosts — user selects compute target (current host is marked and pre-selected by default).
-4. Lists datastores on the selected host with free/total capacity — user selects (default: first in list).
-5. Lists networks on the selected host — user selects, or enters `0` to keep original network assignments (default: keep original).
-6. Prompts for new VM name (default: original VM name) and power-on preference (default: yes).
-7. Displays a confirmation summary and requires the user to type `YES` before proceeding.
-8. Initiates export via `vsphereVmExportSnapshotV2`.
-9. Polls every 15 seconds and streams live status until the export completes.
+3. Resolves the VM's ESXi host automatically via `physicalPath`, then lists all datastores on that host — user selects by number (default: 1).
+4. Displays available networks on the host for reference — original network assignments are kept on the exported VM.
+5. Prompts for new VM name (default: original VM name) and power-on preference (default: yes).
+6. Displays a confirmation summary and requires the user to type `YES` before proceeding.
+7. Initiates export via `vsphereVmExportSnapshotV2`.
+8. Polls every 15 seconds and streams live status until the export completes.
 
 **Export parameters:**
 
 | Parameter | Prompt | Default |
 |-----------|--------|---------|
-| Host | Select from numbered list | Current host of the source VM |
-| Datastore | Select from numbered list (shows Free / Capacity) | First in list |
-| Network | Select from numbered list, or `0` to keep original | Keep original |
+| Datastore | Select from numbered list | First in list |
+| Network | Informational display only | Original assignments kept |
 | VM name | Free text | Original VM name |
 | Power on | `[Y/n]` | Yes |
 
-> **Note on multi-NIC VMs:** If a specific network is selected, it is applied to all network adapters of the exported VM. For VMs with multiple NICs that require different network assignments per adapter, use the RSC GUI instead.
+> **Network reassignment:** The RSC API requires vSphere-internal MOID and NIC device keys for per-NIC network remapping, which are not exposed via the GraphQL API. Networks are therefore always kept from the snapshot. Reassign networks in vSphere after export if needed.
 
 **Status monitoring:**
 
@@ -318,12 +316,13 @@ Export completed successfully.
   Snapshot    : 2026-05-01T03:57:34.000Z
   Cluster     : Rubrik-Demo1
   New VM name : my-vm-01-export
-  Host        : esx-host-01.lab.local
   Datastore   : DS-SSD-01
-  Network     : VM Network
+  Network     : (keep original)
   Power on    : true
   Duration    : 4m 32s
-  Job ID      : EXPORT_VSPHERE_...
+  Start time  : 2026-05-01T03:58:00.000Z
+  End time    : 2026-05-01T04:02:32.000Z
+  Job ID      : PARALLEL_EXPORT_VMWARE_SNAPSHOT_...
 ```
 
 ---
