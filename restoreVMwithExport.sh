@@ -401,30 +401,83 @@ MUTATION='mutation ExportSnapshot($input: VsphereVmExportSnapshotV2Input!) {
   }
 }'
 
-# Field names confirmed from RSC API error: ExportSnapshotJobConfigV2Input
-CONFIG=$(jq -n \
-  --arg   newVmName  "$NEW_VM_NAME" \
-  --arg   datastoreId "$EXPORT_DS_ID" \
-  --argjson shouldPowerOn          "$POWER_ON" \
-  --argjson shouldKeepMacAddresses false \
-  --argjson shouldDisableNetwork   false \
-  '{
-    newVmName:              $newVmName,
-    datastoreId:            $datastoreId,
-    shouldPowerOn:          $shouldPowerOn,
-    shouldKeepMacAddresses: $shouldKeepMacAddresses,
-    shouldDisableNetwork:   $shouldDisableNetwork
-  }')
+# Introspect schema to discover the actual field names for this RSC version.
+# RSC changes field names between releases — this avoids hard-coded guesses.
+SCHEMA_RESP=$(gql_soft "query {
+  cfgType: __type(name: \"ExportSnapshotJobConfigV2Input\") {
+    inputFields { name }
+  }
+  inpType: __type(name: \"VsphereVmExportSnapshotV2Input\") {
+    inputFields { name }
+  }
+}")
 
-if [[ -n "$EXPORT_NET_ID" ]]; then
-  CONFIG=$(echo "$CONFIG" | jq --arg netId "$EXPORT_NET_ID" \
-    '. + {networkInterfaces: [{networkId: $netId}]}')
+CFG_FIELDS=$(echo "$SCHEMA_RESP" | jq -r '[.data.cfgType.inputFields // [] | .[].name] | join(" ")')
+INP_FIELDS=$(echo "$SCHEMA_RESP" | jq -r '[.data.inpType.inputFields // [] | .[].name] | join(" ")')
+
+has_cfg() { echo " $CFG_FIELDS " | grep -q " $1 "; }
+has_inp() { echo " $INP_FIELDS " | grep -q " $1 "; }
+
+# Start with the one confirmed-required field
+CONFIG=$(jq -n --arg ds "$EXPORT_DS_ID" '{datastoreId: $ds}')
+
+# VM name — try config level first, then track if it belongs at input level
+VM_NAME_INPUT_KEY=""
+for f in newVmName vmName name exportedVmName; do
+  if has_cfg "$f"; then
+    CONFIG=$(echo "$CONFIG" | jq --arg v "$NEW_VM_NAME" --arg k "$f" '. + {($k): $v}')
+    break
+  fi
+done
+# If not in config, check top-level input
+if ! (has_cfg "newVmName" || has_cfg "vmName" || has_cfg "name" || has_cfg "exportedVmName"); then
+  for f in newVmName vmName name exportedVmName; do
+    if has_inp "$f"; then VM_NAME_INPUT_KEY="$f"; break; fi
+  done
 fi
 
-VARIABLES=$(jq -n \
-  --arg   snapId "$SNAP_ID" \
-  --argjson config "$CONFIG" \
-  '{input: {id: $snapId, config: $config}}')
+# Power on
+for f in shouldPowerOn powerOn isPoweredOn; do
+  if has_cfg "$f"; then
+    CONFIG=$(echo "$CONFIG" | jq --argjson v "$POWER_ON" --arg k "$f" '. + {($k): $v}')
+    break
+  fi
+done
+
+# Keep MAC addresses
+for f in shouldKeepMacAddresses keepMacAddresses; do
+  if has_cfg "$f"; then
+    CONFIG=$(echo "$CONFIG" | jq --argjson v false --arg k "$f" '. + {($k): $v}')
+    break
+  fi
+done
+
+# Disable network
+for f in shouldDisableNetwork disableNetwork; do
+  if has_cfg "$f"; then
+    CONFIG=$(echo "$CONFIG" | jq --argjson v false --arg k "$f" '. + {($k): $v}')
+    break
+  fi
+done
+
+# Network interfaces (only if a network was selected)
+if [[ -n "$EXPORT_NET_ID" ]]; then
+  for f in networkInterfaces networkDevices; do
+    if has_cfg "$f"; then
+      CONFIG=$(echo "$CONFIG" | jq --arg id "$EXPORT_NET_ID" --arg k "$f" \
+        '. + {($k): [{networkId: $id}]}')
+      break
+    fi
+  done
+fi
+
+# Build input — VM name goes at top-level if not in config
+INPUT=$(jq -n --arg snapId "$SNAP_ID" --argjson config "$CONFIG" '{id: $snapId, config: $config}')
+if [[ -n "$VM_NAME_INPUT_KEY" ]]; then
+  INPUT=$(echo "$INPUT" | jq --arg v "$NEW_VM_NAME" --arg k "$VM_NAME_INPUT_KEY" '. + {($k): $v}')
+fi
+
+VARIABLES=$(jq -n --argjson input "$INPUT" '{input: $input}')
 
 EXPORT_RESPONSE=$(gql_vars "$MUTATION" "$VARIABLES")
 
