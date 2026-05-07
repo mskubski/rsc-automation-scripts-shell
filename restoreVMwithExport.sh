@@ -81,6 +81,15 @@ gql_vars() {
   echo "$response"
 }
 
+# Soft query — returns raw response without exiting on API error (used for fallbacks)
+gql_soft() {
+  curl --silent -X POST \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $RSC_TOKEN" \
+    -d "$(jq -n --arg q "$1" '{query: $q}')" \
+    "https://$RSC_FQDN/api/graphql"
+}
+
 # ==============================================================================
 # 1. AUTHENTICATE (uses cached token when still valid)
 # ==============================================================================
@@ -221,73 +230,89 @@ CURRENT_HOST_NAME=$(echo "$VM_DETAILS" | jq -r '.data.vSphereVmNew.currentHost.n
 echo ""
 echo "Fetching available ESXi hosts..."
 
-HOST_RESPONSE=$(gql "query {
-  vSphereHostNewConnection {
+HOST_RESPONSE=$(gql_soft "query {
+  vSphereHostNewConnection(filter: [{field: IS_RELIC texts: [\"false\"]}]) {
     nodes { id name }
   }
 }")
 
-HOST_COUNT=$(echo "$HOST_RESPONSE" | jq '.data.vSphereHostNewConnection.nodes | length')
+HOST_NODES=$(echo "$HOST_RESPONSE" | jq '.data.vSphereHostNewConnection.nodes // []')
+HOST_COUNT=$(echo "$HOST_NODES" | jq 'length')
 
-if [[ "$HOST_COUNT" -eq 0 ]]; then
-  echo "Error: No ESXi hosts found in inventory." >&2; exit 1
-fi
+EXPORT_HOST_ID=""
+EXPORT_HOST_NAME=""
 
-echo ""
-echo "Select compute target (ESXi host):"
-echo "────────────────────────────────────────────────────────────────────"
-printf "  %-4s %s\n" "No." "Host Name"
-echo "────────────────────────────────────────────────────────────────────"
+if [[ "$HOST_COUNT" -gt 0 ]]; then
+  echo ""
+  echo "Select compute target (ESXi host):"
+  echo "────────────────────────────────────────────────────────────────────"
+  printf "  %-4s %s\n" "No." "Host Name"
+  echo "────────────────────────────────────────────────────────────────────"
 
-DEFAULT_HOST_SEL=1
-for i in $(seq 0 $((HOST_COUNT - 1))); do
-  H_ID=$(echo "$HOST_RESPONSE"   | jq -r ".data.vSphereHostNewConnection.nodes[$i].id")
-  H_NAME=$(echo "$HOST_RESPONSE" | jq -r ".data.vSphereHostNewConnection.nodes[$i].name")
-  MARKER=""
-  if [[ "$H_ID" == "$CURRENT_HOST_ID" ]]; then
-    MARKER=" (current)"
-    DEFAULT_HOST_SEL=$((i + 1))
+  DEFAULT_HOST_SEL=1
+  for i in $(seq 0 $((HOST_COUNT - 1))); do
+    H_ID=$(echo "$HOST_NODES"   | jq -r ".[$i].id")
+    H_NAME=$(echo "$HOST_NODES" | jq -r ".[$i].name")
+    MARKER=""
+    if [[ "$H_ID" == "$CURRENT_HOST_ID" ]]; then
+      MARKER=" (current)"
+      DEFAULT_HOST_SEL=$((i + 1))
+    fi
+    printf "  %-4s %s%s\n" "$((i + 1))" "$H_NAME" "$MARKER"
+  done
+
+  echo "────────────────────────────────────────────────────────────────────"
+  echo ""
+  read -rp "Select host (number) [default: $DEFAULT_HOST_SEL]: " HOST_SEL
+
+  if [[ -z "$HOST_SEL" ]]; then HOST_SEL=$DEFAULT_HOST_SEL; fi
+
+  if ! [[ "$HOST_SEL" =~ ^[0-9]+$ ]] || (( HOST_SEL < 1 || HOST_SEL > HOST_COUNT )); then
+    echo "Error: Invalid selection." >&2; exit 1
   fi
-  printf "  %-4s %s%s\n" "$((i + 1))" "$H_NAME" "$MARKER"
-done
 
-echo "────────────────────────────────────────────────────────────────────"
-echo ""
-read -rp "Select host (number) [default: $DEFAULT_HOST_SEL]: " HOST_SEL
+  HOST_IDX=$((HOST_SEL - 1))
+  EXPORT_HOST_ID=$(echo "$HOST_NODES" | jq -r ".[$HOST_IDX].id")
+  EXPORT_HOST_NAME=$(echo "$HOST_NODES" | jq -r ".[$HOST_IDX].name")
 
-if [[ -z "$HOST_SEL" ]]; then HOST_SEL=$DEFAULT_HOST_SEL; fi
+elif [[ -n "$CURRENT_HOST_ID" ]]; then
+  echo "  -> Host listing unavailable. Using current VM host: $CURRENT_HOST_NAME"
+  EXPORT_HOST_ID="$CURRENT_HOST_ID"
+  EXPORT_HOST_NAME="$CURRENT_HOST_NAME"
 
-if ! [[ "$HOST_SEL" =~ ^[0-9]+$ ]] || (( HOST_SEL < 1 || HOST_SEL > HOST_COUNT )); then
-  echo "Error: Invalid selection." >&2; exit 1
+else
+  echo "Error: Could not determine a compute target (no hosts found, current host unknown)." >&2; exit 1
 fi
-
-HOST_IDX=$((HOST_SEL - 1))
-EXPORT_HOST_ID=$(echo "$HOST_RESPONSE"   | jq -r ".data.vSphereHostNewConnection.nodes[$HOST_IDX].id")
-EXPORT_HOST_NAME=$(echo "$HOST_RESPONSE" | jq -r ".data.vSphereHostNewConnection.nodes[$HOST_IDX].name")
 
 # ==============================================================================
 # 6. SELECT DATASTORE
 # ==============================================================================
 echo ""
-echo "Fetching datastores on $EXPORT_HOST_NAME..."
+echo "Fetching datastores..."
 
-DS_RESPONSE=$(gql "query {
+# Try host-scoped query first, fall back to top-level inventory
+DS_RESP=$(gql_soft "query {
   vSphereHostNew(fid: \"$EXPORT_HOST_ID\") {
     datastoreConnection {
-      nodes {
-        id
-        name
-        capacityBytes
-        freeSpaceBytes
-      }
+      nodes { id name capacityBytes freeSpaceBytes }
     }
   }
 }")
+DS_NODES=$(echo "$DS_RESP" | jq 'if .errors then [] else (.data.vSphereHostNew.datastoreConnection.nodes // []) end')
 
-DS_COUNT=$(echo "$DS_RESPONSE" | jq '.data.vSphereHostNew.datastoreConnection.nodes | length')
+if [[ "$(echo "$DS_NODES" | jq 'length')" -eq 0 ]]; then
+  DS_RESP=$(gql "query {
+    vSphereDatastoreNewConnection {
+      nodes { id name capacityBytes freeSpaceBytes }
+    }
+  }")
+  DS_NODES=$(echo "$DS_RESP" | jq '.data.vSphereDatastoreNewConnection.nodes // []')
+fi
+
+DS_COUNT=$(echo "$DS_NODES" | jq 'length')
 
 if [[ "$DS_COUNT" -eq 0 ]]; then
-  echo "Error: No datastores found on host $EXPORT_HOST_NAME." >&2; exit 1
+  echo "Error: No datastores found." >&2; exit 1
 fi
 
 echo ""
@@ -297,11 +322,9 @@ printf "  %-4s %-36s %-12s %s\n" "No." "Datastore Name" "Free" "Capacity"
 echo "────────────────────────────────────────────────────────────────────"
 
 for i in $(seq 0 $((DS_COUNT - 1))); do
-  DS_NAME=$(echo "$DS_RESPONSE" | jq -r ".data.vSphereHostNew.datastoreConnection.nodes[$i].name")
-  DS_FREE=$(echo "$DS_RESPONSE" | jq -r \
-    ".data.vSphereHostNew.datastoreConnection.nodes[$i].freeSpaceBytes // 0 | . / 1073741824 | floor | tostring + \" GB\"")
-  DS_CAP=$(echo "$DS_RESPONSE" | jq -r \
-    ".data.vSphereHostNew.datastoreConnection.nodes[$i].capacityBytes // 0 | . / 1073741824 | floor | tostring + \" GB\"")
+  DS_NAME=$(echo "$DS_NODES" | jq -r ".[$i].name")
+  DS_FREE=$(echo "$DS_NODES" | jq -r ".[$i].freeSpaceBytes // 0 | . / 1073741824 | floor | tostring + \" GB\"")
+  DS_CAP=$(echo "$DS_NODES"  | jq -r ".[$i].capacityBytes  // 0 | . / 1073741824 | floor | tostring + \" GB\"")
   printf "  %-4s %-36s %-12s %s\n" "$((i + 1))" "$DS_NAME" "$DS_FREE" "$DS_CAP"
 done
 
@@ -316,24 +339,35 @@ if ! [[ "$DS_SEL" =~ ^[0-9]+$ ]] || (( DS_SEL < 1 || DS_SEL > DS_COUNT )); then
 fi
 
 DS_IDX=$((DS_SEL - 1))
-EXPORT_DS_ID=$(echo "$DS_RESPONSE"   | jq -r ".data.vSphereHostNew.datastoreConnection.nodes[$DS_IDX].id")
-EXPORT_DS_NAME=$(echo "$DS_RESPONSE" | jq -r ".data.vSphereHostNew.datastoreConnection.nodes[$DS_IDX].name")
+EXPORT_DS_ID=$(echo "$DS_NODES"   | jq -r ".[$DS_IDX].id")
+EXPORT_DS_NAME=$(echo "$DS_NODES" | jq -r ".[$DS_IDX].name")
 
 # ==============================================================================
 # 7. SELECT NETWORK (optional — 0 keeps original)
 # ==============================================================================
 echo ""
-echo "Fetching networks on $EXPORT_HOST_NAME..."
+echo "Fetching networks..."
 
-NET_RESPONSE=$(gql "query {
+# Try host-scoped query first, fall back to top-level inventory
+NET_RESP=$(gql_soft "query {
   vSphereHostNew(fid: \"$EXPORT_HOST_ID\") {
     networkConnection {
       nodes { id name }
     }
   }
 }")
+NET_NODES=$(echo "$NET_RESP" | jq 'if .errors then [] else (.data.vSphereHostNew.networkConnection.nodes // []) end')
 
-NET_COUNT=$(echo "$NET_RESPONSE" | jq '.data.vSphereHostNew.networkConnection.nodes | length')
+if [[ "$(echo "$NET_NODES" | jq 'length')" -eq 0 ]]; then
+  NET_RESP=$(gql_soft "query {
+    vSphereNetworkNewConnection {
+      nodes { id name }
+    }
+  }")
+  NET_NODES=$(echo "$NET_RESP" | jq 'if .errors then [] else (.data.vSphereNetworkNewConnection.nodes // []) end')
+fi
+
+NET_COUNT=$(echo "$NET_NODES" | jq 'length')
 
 EXPORT_NET_ID=""
 EXPORT_NET_NAME="(keep original)"
@@ -347,7 +381,7 @@ if [[ "$NET_COUNT" -gt 0 ]]; then
   printf "  %-4s %s\n" "0" "(keep original)"
 
   for i in $(seq 0 $((NET_COUNT - 1))); do
-    N_NAME=$(echo "$NET_RESPONSE" | jq -r ".data.vSphereHostNew.networkConnection.nodes[$i].name")
+    N_NAME=$(echo "$NET_NODES" | jq -r ".[$i].name")
     printf "  %-4s %s\n" "$((i + 1))" "$N_NAME"
   done
 
@@ -363,11 +397,11 @@ if [[ "$NET_COUNT" -gt 0 ]]; then
 
   if [[ "$NET_SEL" -gt 0 ]]; then
     NET_IDX=$((NET_SEL - 1))
-    EXPORT_NET_ID=$(echo "$NET_RESPONSE"   | jq -r ".data.vSphereHostNew.networkConnection.nodes[$NET_IDX].id")
-    EXPORT_NET_NAME=$(echo "$NET_RESPONSE" | jq -r ".data.vSphereHostNew.networkConnection.nodes[$NET_IDX].name")
+    EXPORT_NET_ID=$(echo "$NET_NODES"   | jq -r ".[$NET_IDX].id")
+    EXPORT_NET_NAME=$(echo "$NET_NODES" | jq -r ".[$NET_IDX].name")
   fi
 else
-  echo "  (No networks found on host — original network assignments will be kept)"
+  echo "  (No networks found — original network assignments will be kept)"
 fi
 
 # ==============================================================================
