@@ -136,3 +136,4 @@ RBS (Rubrik Backup Service) is tried first without credentials. If RSC returns e
 | `restoreVM.sh` | Interactive VM in-place restore — monitors via `activitySeriesConnection` |
 | `restoreVMwithExport.sh` | Interactive VM export to new VM — prompts for host, datastore, network, VM name |
 | `filerestoreVM.sh` | Interactive file browser + file-level restore — RBS first, guest creds fallback |
+| `VMsize.sh` | List all VMs with VM storage size and backup storage size, sorted by VM size descending |
