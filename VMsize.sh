@@ -38,6 +38,22 @@ if ! command -v jq &>/dev/null; then
 fi
 
 # ==============================================================================
+# GraphQL helper
+# ==============================================================================
+gql() {
+  local response
+  response=$(curl --silent -X POST \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $RSC_TOKEN" \
+    -d "$(jq -n --arg q "$1" '{query: $q}')" \
+    "https://$RSC_FQDN/api/graphql")
+  if echo "$response" | jq -e '.errors' &>/dev/null; then
+    echo "API error:" >&2; echo "$response" | jq '.errors' >&2; exit 1
+  fi
+  echo "$response"
+}
+
+# ==============================================================================
 # 1. AUTHENTICATE
 # ==============================================================================
 echo "Authenticating with RSC..."
@@ -45,12 +61,12 @@ source "$SCRIPT_DIR/rsc_auth.sh"
 get_rsc_token || exit 1
 
 # ==============================================================================
-# 2. FETCH VM INVENTORY WITH STORAGE METRICS
+# 2. PHASE 1 — Fetch all VMs with VM storage size
 # ==============================================================================
 echo ""
-echo "Fetching VM storage metrics..."
+echo "Fetching VM inventory..."
 
-QUERY='query {
+VM_RESPONSE=$(gql 'query {
   vSphereVmNewConnection(
     filter: [
       {field: IS_RELIC texts: "false"}
@@ -58,56 +74,60 @@ QUERY='query {
     ]
   ) {
     nodes {
+      id
       name
       usedCapacityBytes
-      snapshotConnection(first: 1000) {
-        nodes {
-          physicalBytes
-        }
-      }
     }
   }
-}'
+}')
 
-RESPONSE=$(curl --silent -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $RSC_TOKEN" \
-  -d "$(jq -n --arg q "$QUERY" '{query: $q}')" \
-  "https://$RSC_FQDN/api/graphql")
-
-if echo "$RESPONSE" | jq -e '.errors' &>/dev/null; then
-  echo "API error:" >&2
-  echo "$RESPONSE" | jq '.errors' >&2
-  exit 1
-fi
-
-VM_COUNT=$(echo "$RESPONSE" | jq '.data.vSphereVmNewConnection.nodes | length')
+VM_COUNT=$(echo "$VM_RESPONSE" | jq '.data.vSphereVmNewConnection.nodes | length')
 
 if [[ "$VM_COUNT" == "0" || "$VM_COUNT" == "null" ]]; then
   echo "Error: No VMs found." >&2
   exit 1
 fi
 
-# ==============================================================================
-# 3. BUILD AND DISPLAY SORTED TABLE
-# ==============================================================================
-# For each VM: emit "<vm_bytes>\t<backup_bytes>\t<name>"
-# sort -rn sorts descending by first numeric field (VM size)
-# awk converts bytes to GB and formats the table
+echo "Found $VM_COUNT VMs. Fetching backup sizes..."
 
-echo ""
-echo "$RESPONSE" | jq -r '
-  .data.vSphereVmNewConnection.nodes[] |
-  {
-    name:         .name,
-    vm_bytes:     (.usedCapacityBytes // 0),
-    backup_bytes: ([.snapshotConnection.nodes[].physicalBytes // 0] | add // 0)
-  } |
-  "\(.vm_bytes)\t\(.backup_bytes)\t\(.name)"
-' | sort -t $'\t' -k1 -rn | awk -F'\t' '
+# ==============================================================================
+# 3. PHASE 2 — Fetch snapshot sizes per VM and accumulate results
+# ==============================================================================
+# Each row: "<vm_bytes>\t<backup_bytes>\t<name>"
+ROWS=""
+
+for i in $(seq 0 $((VM_COUNT - 1))); do
+  VM_ID=$(echo   "$VM_RESPONSE" | jq -r ".data.vSphereVmNewConnection.nodes[$i].id")
+  VM_NAME=$(echo "$VM_RESPONSE" | jq -r ".data.vSphereVmNewConnection.nodes[$i].name")
+  VM_BYTES=$(echo "$VM_RESPONSE" | jq -r ".data.vSphereVmNewConnection.nodes[$i].usedCapacityBytes // 0")
+
+  printf "\r  [%d/%d] %-50s" "$((i + 1))" "$VM_COUNT" "$VM_NAME" >&2
+
+  SNAP_RESPONSE=$(gql "query {
+    vSphereVmNew(fid: \"$VM_ID\") {
+      snapshotConnection(first: 1000) {
+        nodes {
+          physicalBytes
+        }
+      }
+    }
+  }")
+
+  BACKUP_BYTES=$(echo "$SNAP_RESPONSE" | jq '
+    [.data.vSphereVmNew.snapshotConnection.nodes[].physicalBytes // 0] | add // 0
+  ')
+
+  ROWS="${ROWS}${VM_BYTES}\t${BACKUP_BYTES}\t${VM_NAME}\n"
+done
+
+printf "\r%-80s\r" "" >&2  # clear progress line
+
+# ==============================================================================
+# 4. SORT AND DISPLAY TABLE
+# ==============================================================================
+printf "%b" "$ROWS" | sort -t $'\t' -k1 -rn | awk -F'\t' '
 BEGIN {
-  line = "  " sprintf("%-45s", "") "  " sprintf("%14s", "") "  " sprintf("%18s", "")
-  sep  = "  ------------------------------------------------------------------------------"
+  sep = "  --------------------------------------------------------------------------------"
   printf "\n"
   printf "  %-45s  %14s  %18s\n", "VM Name", "VM Used (GB)", "Backup Used (GB)"
   print sep
@@ -116,7 +136,6 @@ BEGIN {
   vm_gb     = $1 / 1073741824
   backup_gb = $2 / 1073741824
   printf "  %-45s  %14.2f  %18.2f\n", $3, vm_gb, backup_gb
-
   total_vm     += $1
   total_backup += $2
   count++
