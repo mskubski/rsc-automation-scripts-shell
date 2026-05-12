@@ -487,3 +487,36 @@ VM name:  win2016-fs
 
 **Output:** Confirmation message on success or a detailed error if any step fails.
 
+---
+
+### `VMsize.sh` *(current)*
+
+Lists all non-relic, non-replicated vSphere VMs with their VM storage size and local backup storage used on Rubrik, sorted by VM size descending. All data is fetched in a single GraphQL query.
+
+**Uses:** `.env` file
+
+**Usage:**
+```bash
+bash VMsize.sh
+```
+
+**Output:**
+
+```
+  VM Name                                          VM Used (GB)    Backup Used (GB)
+  --------------------------------------------------------------------------------
+  win2016-fs                                              24.41               19.49
+  haverford-db-01                                          4.81                3.85
+  haverford-webapp-01                                      3.61                2.75
+  zaffre-db-01                                             3.00                0.66
+  zaffre-dev                                               1.62                0.80
+  haverford-dev                                            1.60                0.94
+  --------------------------------------------------------------------------------
+  TOTAL (6 VMs)                                           39.06               28.49
+```
+
+| Column | Source | Description |
+|---|---|---|
+| VM Used (GB) | `reportWorkload.usedBytes` | Storage used by the VM on its vSphere datastore |
+| Backup Used (GB) | `reportWorkload.localStorage` | Local snapshot storage consumed on the Rubrik cluster |
+

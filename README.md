@@ -459,6 +459,26 @@ Enter SLA name: MyNewSLA
 
 ---
 
+### `VMsize.sh` *(current)*
+
+Lists all vSphere VMs with VM storage size and local backup storage used on Rubrik, sorted by VM size descending.
+
+```bash
+bash VMsize.sh
+```
+
+```
+  VM Name                                          VM Used (GB)    Backup Used (GB)
+  --------------------------------------------------------------------------------
+  win2016-fs                                              24.41               19.49
+  haverford-db-01                                          4.81                3.85
+  ...
+  --------------------------------------------------------------------------------
+  TOTAL (9 VMs)                                           39.06               28.49
+```
+
+---
+
 ### `createSLAandAsign2VM.sh` *(current)*
 
 Creates a new SLA domain (or reuses one with the same name if it already exists) and assigns it to a specific VM. Both names are entered interactively.
