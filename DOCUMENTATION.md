@@ -411,7 +411,7 @@ The script exits with code `0` on success or code `1` on failure or cancellation
 
 ### `getAllclusters.sh` *(current)*
 
-Queries all Rubrik clusters registered in RSC and prints detailed JSON output including capacity metrics, node details, geo-location, and status information.
+Queries all Rubrik clusters registered in RSC and displays them as a readable summary — one block per cluster with nodes, capacity, and status.
 
 **Uses:** `.env` file
 
@@ -420,7 +420,43 @@ Queries all Rubrik clusters registered in RSC and prints detailed JSON output in
 bash getAllclusters.sh
 ```
 
-**Output:** Formatted JSON with full cluster inventory including capacity metrics (`totalCapacity`, `availableCapacity`, `usedCapacity`, `averageDailyGrowth`), node details, and geo-location.
+**Output:**
+
+```
+════════════════════════════════════════════════════════════════════════
+  RSC Cluster Inventory  (2 cluster(s))
+════════════════════════════════════════════════════════════════════════
+
+  ┌─ Rubrik-Demo1
+  │  Type:              Robo
+  │  Version:           9.4.3-p2-31324
+  │  Address:           rubrik-demo1.rubrik.lab
+  │  Location:          Palo Alto, CA, USA
+  │  Status:            Connected / DEFAULT  (system: OK  pause: NOT_PAUSED)
+  │  Encryption:        No
+  │  EOS Date:          2027-01-14
+  │
+  │  Storage:           0.09 TB used / 0.21 TB total (43%)  —  0.12 TB free
+  │  Daily Growth:      0.88 GB/day
+  │  Est. Runway:       140 days
+  │  Last Updated:      2026-05-13 12:38:10
+  │
+  │  Nodes (1):
+  │    Hostname                         IP Address       Status
+  │    ──────────────────────────────────────────────────────
+  │    VRVW421CA88EA                    10.0.2.10        OK
+  └────────────────────────────────────────────────────────────────
+```
+
+| Field | Description |
+|---|---|
+| Type | Cluster type (Robo, Cloud, etc.) |
+| Status | Connection status / sub-status / system status / pause state |
+| Storage | Used / Total in TB with percentage and free space |
+| Daily Growth | Average daily data growth in GB |
+| Est. Runway | Estimated days until storage is full |
+| EOS Date | End-of-support date for the cluster version |
+| Nodes | Per-node hostname, IP address, and status |
 
 ---
 
